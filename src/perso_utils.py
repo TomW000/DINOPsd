@@ -1,8 +1,8 @@
-from DinoPsd_utils import gaussian_kernel, torch_convolve
-from setup import *
-from setup import np, os, plt, pd, sns, Counter, tqdm, torch, h5py, glob
+from .DinoPsd_utils import gaussian_kernel, torch_convolve
+from .setup import *
+from .setup import np, os, plt, pd, sns, Counter, tqdm, torch, h5py, glob
 
-from analysis_utils import *
+from .analysis_utils import *
 
 kernel = gaussian_kernel(size=3, sigma=1)
 kernel = torch.tensor(kernel, dtype=torch.float32, device=device)

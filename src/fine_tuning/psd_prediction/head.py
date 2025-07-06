@@ -13,7 +13,7 @@ class Psd_Pred_MLP_Head(nn.Module):
     def __init__(self, device, feat_dim):
         super().__init__()
         self.device = device
-        self.nb_outputs = 2
+        self.nb_outputs = 1
         self.feat_dim = feat_dim
         self.hidden_dims = self.feat_dim*np.array([3/4, 1/2, 1/4])
         self.hidden_dims = self.hidden_dims.astype(int)
@@ -29,7 +29,7 @@ class Psd_Pred_MLP_Head(nn.Module):
                                    nn.ReLU(),
                                    nn.Linear(self.hidden_dims[2],
                                              self.nb_outputs),
-                                   nn.Sigmoid())
+                                   nn.Softmax(dim=1)) #FIXME: dim?
 
         self.apply(init_model)
         self.to(self.device)

@@ -2,12 +2,13 @@ import torch
 from torch import nn
 from tqdm import tqdm
 import numpy as np
+import os 
 
-from .head import detection_head, Psd_Pred_MLP_Head
+from .head import Psd_Pred_MLP_Head
 from .dataset import cross_validation_datasets_generator
 from src.fine_tuning.display_results import training_curve, confusion_matrix
 
-from src.setup import device, feat_dim
+from src.setup import device, feat_dim, model_weights_path
 
 # the training/testing loop should train on the cross-validated datasets for one epoch, pick the worst case and train for a few more epochs on it.
 # It should then return a trained MLP Head that can later be used for semantic segmentation 
@@ -19,21 +20,20 @@ from src.setup import device, feat_dim
 def detection_head_training(nb_epochs, detection_head, train_set, test_set, return_statistics):
 
     """
-    Train and evaluate a detection head using the provided training and testing datasets.
+    Train a detection head using the provided training and testing datasets.
 
     Args:
-        nb_epochs (int): Number of epochs to train the detection head.
-        detection_head (nn.Module): The neural network model representing the detection head.
+        nb_epochs (int): Number of epochs to train the model for.
+        detection_head (nn.Module): The model to be trained.
         train_set (DataLoader): DataLoader for the training dataset, providing batches of embeddings and one-hot labels.
         test_set (DataLoader): DataLoader for the testing dataset, providing batches of embeddings and one-hot labels.
-        return_statistics (bool): If True, return detailed statistics (loss list, prediction list, and test accuracies), 
-                                  otherwise return the final test accuracy and the model's state dictionary.
+        return_statistics (bool): If True, returns training loss, prediction list, test accuracies, and model state dict.
 
     Returns:
-        Union[Tuple[List[float], List[List[int]], List[float]], Tuple[float, Dict]]: Depending on `return_statistics`, 
-        either returns:
-            - A tuple containing the list of training losses, prediction pairs, and test accuracies over epochs, or
-            - A tuple with the final test accuracy and the state dictionary of the trained detection head.
+        If return_statistics is True:
+            tuple: (loss_list, prediction_list, test_accuracies, detection_head.state_dict())
+        Else:
+            float: The test accuracy of the final epoch.
     """
 
     loss_list = []
@@ -93,16 +93,20 @@ def detection_head_training(nb_epochs, detection_head, train_set, test_set, retu
     else:
         return test_accuracies[-1]
 
-if __name__ == '__main__':
 
-    untrained_head = detection_head
-
+def main():
+    """
+    Train a psd detection head on a cross-validation dataset until the test accuracy 
+    does not improve any more. The most challenging dataset is the one with the lowest 
+    test accuracy after training for one epoch. The MLP head is then trained on this 
+    dataset for 10 epochs and the training curve is plotted. The test accuracy, the 
+    confusion matrix and the trained head are saved.
+    """
     dataset_generator = cross_validation_datasets_generator(test_proportion=0.2)
 
     latest_test_accuracy = 100.0
     most_challenging_dataset = None
-    for n, (train_set, test_set) in tqdm(enumerate(dataset_generator)):
-        
+    for train_set, test_set in tqdm(dataset_generator, desc='Datasets', leave=False):
         detection_head = Psd_Pred_MLP_Head(device=device, feat_dim=feat_dim)
         detection_head.to(device)
         test_accuracy = detection_head_training(nb_epochs=1, 
@@ -110,15 +114,15 @@ if __name__ == '__main__':
                                                 train_set=train_set, 
                                                 test_set=test_set, 
                                                 return_statistics=False) # type: ignore
-        print(test_accuracy)
-        if test_accuracy < latest_test_accuracy:
+        if test_accuracy <= latest_test_accuracy:
             most_challenging_dataset = (train_set, test_set)
         
         latest_test_accuracy = test_accuracy
 
 
     train_set, test_set = most_challenging_dataset
-    detection_head = untrained_head
+    detection_head = Psd_Pred_MLP_Head(device=device, feat_dim=feat_dim)
+    detection_head.to(device)
     nb_epochs = 10
     loss_list, prediction_list, test_accuracies, head_weights = detection_head_training(nb_epochs=nb_epochs, # type: ignore
                                                                         detection_head=detection_head, 
@@ -131,3 +135,5 @@ if __name__ == '__main__':
                      prediction_list=prediction_list, 
                      nb_epochs=nb_epochs,
                      split='test')
+
+    torch.save(obj=head_weights, f=os.path.join(model_weights_path, 'psd_head_weights.pt'))

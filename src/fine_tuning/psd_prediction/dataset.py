@@ -14,7 +14,7 @@ from src.DinoPsd_utils import get_img_processing_f
 from src.setup import embeddings_path, feat_dim
 
 _EMBEDDINGS = torch.load(os.path.join(embeddings_path, 'small_dataset_embs_518.pt'))
-_EMBEDDINGS = np.vstack(_EMBEDDINGS)
+_EMBEDDINGS = np.vstack(_EMBEDDINGS)[:600]
 
 nb_columns = _EMBEDDINGS.shape[0]
 columns = np.random.choice(nb_columns, size=nb_columns, replace=False)
@@ -49,11 +49,9 @@ PSD = np.array(PSD_list)
 REST = np.array(REST_list)
 
 
-PSD_LABELS = np.zeros((PSD.shape[0], 2))
-PSD_LABELS[:,1] = 1
+PSD_LABELS = np.ones((PSD.shape[0]))
 
-REST_LABELS = np.zeros((REST.shape[0], 2))
-REST_LABELS[:,0] = 1
+REST_LABELS = np.zeros((REST.shape[0]))
 
 
 LABELLED_PSD = list(zip(PSD, PSD_LABELS))
@@ -69,10 +67,11 @@ class Custom_Detection_Dataset(Dataset):
         
         assert set_type in {'training', 'test'}, 'set_type must be either training or test'
         
+        self.set_type = set_type
         self.test_proportion = test_proportion
 
         self.psd = LABELLED_PSD 
-        self.len_psd = len(self.psd)
+        self.len_psd = len(self.psd) // 2
         
         self.rest = LABELLED_REST[self.len_psd * n :self.len_psd * (n+1)]
 
@@ -82,9 +81,11 @@ class Custom_Detection_Dataset(Dataset):
         self.TRAINING_SET = self.DATASET[self.SPLIT:]
         self.TEST_SET = self.DATASET[:self.SPLIT]
         
-        if set == 'training':
+        print(f'Dataset length: {len(self.TRAINING_SET)}, {len(self.TEST_SET)}')
+        
+        if set_type == 'training':
             self.data = self.TRAINING_SET
-        else:
+        elif set_type == 'test':
             self.data = self.TEST_SET
 
     def __len__(self):
@@ -94,9 +95,11 @@ class Custom_Detection_Dataset(Dataset):
         return self.data[idx]
 
 
-train_batch_size, test_batch_size = 50, 50
+train_batch_size, test_batch_size = 1, 1
 
-n_splits = len(LABELLED_REST) // len(LABELLED_PSD)
+n_splits = (len(LABELLED_REST) // len(LABELLED_PSD)) * 2
+
+print(f'Number of splits: {n_splits}')
 
 def cross_validation_datasets_generator(test_proportion):
     for k in tqdm(range(n_splits), desc='Creating datasets'):

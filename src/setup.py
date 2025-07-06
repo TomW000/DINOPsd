@@ -59,7 +59,11 @@ embeddings_path = '/Users/tomw/Documents/MVA/Internship/Cambridge/Embeddings'
 
 save_path ='/home/tomwelch/Cambridge/Output' 
 
-model_weights_path = '/home/tomwelch/Cambridge/model_weights'
+#TODO: For LINUX:
+#model_weights_path = '/home/tomwelch/Cambridge/model_weights'
+
+#TODO: For MAC:
+model_weights_path = '/Users/tomw/Documents/MVA/Internship/Cambridge/model_weights'
 
 
 dates = sorted(glob(os.path.join(dataset_path, '*')))

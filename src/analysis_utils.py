@@ -1,7 +1,7 @@
-from setup import torch, Trans, torchvision, np, h5py, plt, product, sns
-from setup import resize_size, feat_dim, model, device
-from DinoPsd import DinoPsd_pipeline
-from DinoPsd_utils import get_img_processing_f
+from .setup import torch, Trans, torchvision, np, h5py, plt, product, sns
+from .setup import resize_size, feat_dim, model, device
+from .DinoPsd import DinoPsd_pipeline
+from .DinoPsd_utils import get_img_processing_f
 
 
 few_shot = DinoPsd_pipeline(model, 

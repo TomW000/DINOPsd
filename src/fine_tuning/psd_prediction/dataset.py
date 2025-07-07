@@ -14,14 +14,10 @@ from src.DinoPsd_utils import get_img_processing_f
 from src.setup import embeddings_path, feat_dim
 
 _EMBEDDINGS = torch.load(os.path.join(embeddings_path, 'small_dataset_embs_518.pt'))
-_EMBEDDINGS = np.vstack(_EMBEDDINGS)[:600]
+EMBEDDINGS=[]
+for e in _EMBEDDINGS:
+    EMBEDDINGS.extend(e)
 
-nb_columns = _EMBEDDINGS.shape[0]
-columns = np.random.choice(nb_columns, size=nb_columns, replace=False)
-
-EMBEDDINGS = _EMBEDDINGS[columns, :]
-
-assert EMBEDDINGS.shape == _EMBEDDINGS.shape
 
 print('Done loading embeddings')
 
@@ -33,7 +29,7 @@ print('Done loading reference embeddings')
 
 PSD_list, REST_list = [], []
 
-nb_best_patches = 10
+nb_best_patches = 1
 
 for image in tqdm(EMBEDDINGS, desc='Comparing embeddings to reference'):
     flattened_image = image.reshape(-1, feat_dim)
@@ -46,7 +42,15 @@ for image in tqdm(EMBEDDINGS, desc='Comparing embeddings to reference'):
 
 
 PSD = np.array(PSD_list)
-REST = np.array(REST_list)
+
+
+mean_psd_embedding = np.mean(REFS, axis=0)
+
+_REST = np.array(REST_list)
+
+distances = cosine_similarity(mean_psd_embedding[None], _REST)
+idx = distances.argsort()
+REST = _REST[idx]
 
 
 PSD_LABELS = np.ones((PSD.shape[0]))
@@ -58,6 +62,8 @@ LABELLED_PSD = list(zip(PSD, PSD_LABELS))
 
 LABELLED_REST = list(zip(REST, REST_LABELS))
 
+
+dataset_bias = 1
 
 class Custom_Detection_Dataset(Dataset):
     def __init__(self, 
@@ -71,7 +77,7 @@ class Custom_Detection_Dataset(Dataset):
         self.test_proportion = test_proportion
 
         self.psd = LABELLED_PSD 
-        self.len_psd = len(self.psd) // 2
+        self.len_psd = len(self.psd) // dataset_bias
         
         self.rest = LABELLED_REST[self.len_psd * n :self.len_psd * (n+1)]
 
@@ -80,9 +86,7 @@ class Custom_Detection_Dataset(Dataset):
         self.SPLIT = int(len(self.DATASET) * self.test_proportion)
         self.TRAINING_SET = self.DATASET[self.SPLIT:]
         self.TEST_SET = self.DATASET[:self.SPLIT]
-        
-        print(f'Dataset length: {len(self.TRAINING_SET)}, {len(self.TEST_SET)}')
-        
+
         if set_type == 'training':
             self.data = self.TRAINING_SET
         elif set_type == 'test':
@@ -95,9 +99,9 @@ class Custom_Detection_Dataset(Dataset):
         return self.data[idx]
 
 
-train_batch_size, test_batch_size = 1, 1
+train_batch_size, test_batch_size = 50, 50
 
-n_splits = (len(LABELLED_REST) // len(LABELLED_PSD)) * 2
+n_splits = (len(LABELLED_REST) // len(LABELLED_PSD)) * dataset_bias
 
 print(f'Number of splits: {n_splits}')
 

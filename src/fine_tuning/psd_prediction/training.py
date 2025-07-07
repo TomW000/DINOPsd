@@ -3,6 +3,7 @@ from torch import nn
 from tqdm import tqdm
 import numpy as np
 import os 
+import matplotlib.pyplot as plt
 
 from .head import Psd_Pred_MLP_Head
 from .dataset import cross_validation_datasets_generator
@@ -47,14 +48,14 @@ def detection_head_training(nb_epochs, detection_head, train_set, test_set, retu
         detection_head.train()
         epoch_loss_list = []
 
-        for embeddings, one_hots in tqdm(train_set, desc='Training', leave=False):
+        for embeddings, ground_truths in tqdm(train_set, desc='Training', leave=False):
             embeddings = embeddings.to(device)
-            one_hots = one_hots.to(device).float()  # Make sure targets are float for BCELoss
+            ground_truths = ground_truths.to(device).float().unsqueeze(1)  # Make sure targets are float for BCELoss
 
             optimizer.zero_grad()
-            outputs = detection_head(embeddings).float()  # Ensure float32
+            outputs = detection_head(embeddings).float() # Ensure float32
 
-            loss = loss_fn(outputs, one_hots)
+            loss = loss_fn(outputs, ground_truths)
             loss.backward()
             optimizer.step()
 
@@ -67,15 +68,18 @@ def detection_head_training(nb_epochs, detection_head, train_set, test_set, retu
         with torch.no_grad():
             score = 0
             total = 0
-            for embeddings, one_hots in tqdm(test_set, desc='Testing', leave=False):
+            for embeddings, ground_truths in tqdm(test_set, desc='Testing', leave=False):
                 embeddings = embeddings.to(device)
-                one_hots = one_hots.to(device)
+                ground_truths = ground_truths.to(device)
 
                 outputs = detection_head(embeddings)
 
-                for output, gt in zip(outputs, one_hots):
-                    predicted_idx = torch.argmax(output).item()
-                    true_idx = torch.argmax(gt).item()
+                for output, gt in zip(outputs, ground_truths):
+                    predicted_idx = torch.round(output)
+                    true_idx = gt
+                    
+                    assert type(predicted_idx) == type(true_idx), "predicted_idx and true_idx must be of the same type"
+                    
                     prediction_list.append([predicted_idx, true_idx])
 
                     if predicted_idx == true_idx:
@@ -106,6 +110,7 @@ def main():
 
     latest_test_accuracy = 100.0
     most_challenging_dataset = None
+    latest_test_accuracy_list = []
     for train_set, test_set in tqdm(dataset_generator, desc='Datasets', leave=False):
         detection_head = Psd_Pred_MLP_Head(device=device, feat_dim=feat_dim)
         detection_head.to(device)
@@ -114,13 +119,19 @@ def main():
                                                 train_set=train_set, 
                                                 test_set=test_set, 
                                                 return_statistics=False) # type: ignore
-        if test_accuracy <= latest_test_accuracy:
+        latest_test_accuracy_list.append(test_accuracy)
+        print(f'Test accuracy: {test_accuracy}')
+        if test_accuracy <= latest_test_accuracy: # type: ignore
             most_challenging_dataset = (train_set, test_set)
         
         latest_test_accuracy = test_accuracy
 
+    plt.plot(latest_test_accuracy_list)
+    plt.xlabel('Datasets')
+    plt.ylabel('Test accuracy')
+    plt.show()
 
-    train_set, test_set = most_challenging_dataset
+    train_set, test_set = most_challenging_dataset # type: ignore
     detection_head = Psd_Pred_MLP_Head(device=device, feat_dim=feat_dim)
     detection_head.to(device)
     nb_epochs = 10
@@ -131,9 +142,12 @@ def main():
                                                                         return_statistics=True)
 
     training_curve(nb_epochs, loss_list, test_accuracies)
-    confusion_matrix(data_type='psd',
-                     prediction_list=prediction_list, 
-                     nb_epochs=nb_epochs,
-                     split='test')
+    #confusion_matrix(data_type='psd',
+    #                 prediction_list=prediction_list, 
+    #                 nb_epochs=nb_epochs,
+    #                 split='test')
 
     torch.save(obj=head_weights, f=os.path.join(model_weights_path, 'psd_head_weights.pt'))
+    
+if __name__ == '__main__':
+    main()

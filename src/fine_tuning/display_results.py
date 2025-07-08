@@ -2,9 +2,9 @@ from src.setup import neurotransmitters
 from src.setup import plt, np
 
 
-def training_curve(epochs, loss_list, test_accuracies):
+def training_curve(nb_epochs, loss_list, test_accuracies):
     """Plot training loss and test accuracy over epochs."""
-    x = list(range(epochs))
+    x = list(range(nb_epochs))
     fig, ax1 = plt.subplots(figsize=(7, 5), dpi=150)
     ax2 = ax1.twinx()
 

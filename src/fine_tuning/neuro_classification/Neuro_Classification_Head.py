@@ -1,7 +1,7 @@
 import numpy as np
 from torch import nn
 
-from setup import device, feat_dim
+from src.setup import device, feat_dim
 
 def init_model(module):
     if isinstance(module, nn.Linear):
@@ -28,7 +28,8 @@ class MLP_Head(nn.Module):
                                              self.hidden_dims[2]),
                                    nn.ReLU(),
                                    nn.Linear(self.hidden_dims[2],
-                                             self.nb_outputs)
+                                             self.nb_outputs),
+                                   nn.Softmax(dim=1)
                                    )
 
         self.apply(init_model)

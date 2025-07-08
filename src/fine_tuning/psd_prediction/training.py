@@ -6,7 +6,7 @@ import os
 import matplotlib.pyplot as plt
 
 from .head import Psd_Pred_MLP_Head
-from .dataset import cross_validation_datasets_generator
+from .dataset import cross_validation_datasets_generator, nb_best_patches, dataset_bias
 from src.fine_tuning.display_results import training_curve, confusion_matrix
 
 from src.setup import device, feat_dim, model_weights_path
@@ -77,7 +77,6 @@ def detection_head_training(nb_epochs, detection_head, train_set, test_set, retu
                 for output, gt in zip(outputs, ground_truths):
                     predicted_idx = torch.round(output)
                     true_idx = gt
-                    
                     assert type(predicted_idx) == type(true_idx), "predicted_idx and true_idx must be of the same type"
                     
                     prediction_list.append([predicted_idx, true_idx])
@@ -98,7 +97,7 @@ def detection_head_training(nb_epochs, detection_head, train_set, test_set, retu
         return test_accuracies[-1]
 
 
-def main():
+def training_main():
     """
     Train a psd detection head on a cross-validation dataset until the test accuracy 
     does not improve any more. The most challenging dataset is the one with the lowest 
@@ -111,7 +110,8 @@ def main():
     latest_test_accuracy = 100.0
     most_challenging_dataset = None
     latest_test_accuracy_list = []
-    for train_set, test_set in tqdm(dataset_generator, desc='Datasets', leave=False):
+    challenging_idx = 0
+    for idx, (train_set, test_set) in tqdm(enumerate(dataset_generator), desc='Looping through datasets', leave=False):
         detection_head = Psd_Pred_MLP_Head(device=device, feat_dim=feat_dim)
         detection_head.to(device)
         test_accuracy = detection_head_training(nb_epochs=1, 
@@ -120,25 +120,35 @@ def main():
                                                 test_set=test_set, 
                                                 return_statistics=False) # type: ignore
         latest_test_accuracy_list.append(test_accuracy)
-        print(f'Test accuracy: {test_accuracy}')
-        if test_accuracy <= latest_test_accuracy: # type: ignore
-            most_challenging_dataset = (train_set, test_set)
+        print(f'-Test accuracy: {test_accuracy}')
+        if test_accuracy < latest_test_accuracy: # type: ignore
         
-        latest_test_accuracy = test_accuracy
+            most_challenging_dataset = (train_set, test_set)
+            latest_test_accuracy = test_accuracy
+            challenging_idx = idx
+            print(f'-Latest test accuracy: {latest_test_accuracy}')
+            
+    assert most_challenging_dataset is not None, "No dataset was selected as the most challenging."
+    print(f'-Challenging dataset: {challenging_idx}, worst test accuracy: {latest_test_accuracy}')
 
-    plt.plot(latest_test_accuracy_list)
+    plt.figure(figsize=(10,5))
+    plt.scatter([i for i in range(len(latest_test_accuracy_list))], latest_test_accuracy_list)
     plt.xlabel('Datasets')
     plt.ylabel('Test accuracy')
+    plt.title(f'Test accuracy per dataset - number of PSD patches per image={nb_best_patches} - dataset bias={dataset_bias}')
+    ax = plt.gca()
+    ax.set_ylim(0, 105)
     plt.show()
 
-    train_set, test_set = most_challenging_dataset # type: ignore
+    challenging_train_set, challenging_test_set = most_challenging_dataset # type: ignore
+    print(f'-Datasets: {len(challenging_train_set)}, {len(challenging_test_set)}')
     detection_head = Psd_Pred_MLP_Head(device=device, feat_dim=feat_dim)
     detection_head.to(device)
     nb_epochs = 10
     loss_list, prediction_list, test_accuracies, head_weights = detection_head_training(nb_epochs=nb_epochs, # type: ignore
                                                                         detection_head=detection_head, 
-                                                                        train_set=train_set, 
-                                                                        test_set=test_set, 
+                                                                        train_set=challenging_train_set, 
+                                                                        test_set=challenging_test_set, 
                                                                         return_statistics=True)
 
     training_curve(nb_epochs, loss_list, test_accuracies)
@@ -148,6 +158,3 @@ def main():
     #                 split='test')
 
     torch.save(obj=head_weights, f=os.path.join(model_weights_path, 'psd_head_weights.pt'))
-    
-if __name__ == '__main__':
-    main()

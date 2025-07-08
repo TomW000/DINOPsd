@@ -7,29 +7,31 @@ from torch.utils.data import Dataset
 import torch.utils.data as utils
 from tqdm import tqdm
 from sklearn.metrics.pairwise import cosine_similarity
+from timeit import default_timer as timer
 
 from src.DinoPsd import DinoPsd_pipeline
 from src.DinoPsd_utils import get_img_processing_f
 
 from src.setup import embeddings_path, feat_dim
 
+
+print('-Loading embeddings')
+
 _EMBEDDINGS = torch.load(os.path.join(embeddings_path, 'small_dataset_embs_518.pt'))
+_EMBEDDINGS = _EMBEDDINGS[:10]
 EMBEDDINGS=[]
 for e in _EMBEDDINGS:
     EMBEDDINGS.extend(e)
 
 
-print('Done loading embeddings')
-
-
 REFS = torch.load(os.path.join(embeddings_path, 'small_mean_ref_518_Aug=False_k=10.pt'), weights_only=False)
 
-print('Done loading reference embeddings')
+print('...done loading embeddings')
 
 
 PSD_list, REST_list = [], []
 
-nb_best_patches = 1
+nb_best_patches = 20
 
 for image in tqdm(EMBEDDINGS, desc='Comparing embeddings to reference'):
     flattened_image = image.reshape(-1, feat_dim)
@@ -40,28 +42,32 @@ for image in tqdm(EMBEDDINGS, desc='Comparing embeddings to reference'):
     PSD_list.extend(flattened_image[best_indices])
     REST_list.extend(np.delete(flattened_image, best_indices, axis=0))
 
-
-PSD = np.array(PSD_list)
-
+PSD = torch.from_numpy(np.array(PSD_list))
 
 mean_psd_embedding = np.mean(REFS, axis=0)
 
+print('-Sorting rest embeddings...(this may take a while - check memory usage)')
+start = timer()
 _REST = np.array(REST_list)
 
 distances = cosine_similarity(mean_psd_embedding[None], _REST)
 idx = distances.argsort()
-REST = _REST[idx]
+REST = _REST[idx, :].squeeze()
+REST = torch.from_numpy(REST)
 
+end = timer()
+print(f'...done sorting rest embeddings - it took {end-start:.2f} seconds')
 
-PSD_LABELS = np.ones((PSD.shape[0]))
+PSD_LABELS = torch.ones(PSD.shape[0])
 
-REST_LABELS = np.zeros((REST.shape[0]))
+REST_LABELS = torch.zeros((REST.shape[0]))
 
 
 LABELLED_PSD = list(zip(PSD, PSD_LABELS))
 
 LABELLED_REST = list(zip(REST, REST_LABELS))
 
+print(f'-PSD shape: {PSD.shape}, Rest shape: {REST.shape}')
 
 dataset_bias = 1
 
@@ -103,7 +109,7 @@ train_batch_size, test_batch_size = 50, 50
 
 n_splits = (len(LABELLED_REST) // len(LABELLED_PSD)) * dataset_bias
 
-print(f'Number of splits: {n_splits}')
+print(f'-Number of splits: {n_splits}')
 
 def cross_validation_datasets_generator(test_proportion):
     for k in tqdm(range(n_splits), desc='Creating datasets'):

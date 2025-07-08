@@ -1,14 +1,16 @@
 import torch
 from torch import nn
 import numpy as np
-from tqdm.notebook import tqdm
+from tqdm import tqdm
 import os 
 
 from setup import model, device, model_weights_path
 
-from Fine_Tuning.Adaptor.AdaptFormer import augmented_model
-from Fine_Tuning.Adaptor.AdaptFormer_dataset import ft_training_loader, ft_test_loader
-from Fine_Tuning.Neuro_Classification.Neuro_Classification_Head import head
+from fine_tuning.adaptor.AdaptFormer import augmented_model
+from fine_tuning.neuro_classification.Neuro_Classification_Head import head
+
+from .dataset import training_loader, test_loader
+
 
 
 

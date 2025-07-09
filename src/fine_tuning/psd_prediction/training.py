@@ -44,11 +44,11 @@ def detection_head_training(nb_epochs, detection_head, train_set, test_set, retu
     optimizer = torch.optim.Adam(detection_head.parameters(), lr=3e-4)
     loss_fn = nn.BCELoss()
 
-    for _ in tqdm(range(nb_epochs), desc='Epochs'):
+    for _ in tqdm(range(nb_epochs), desc='--> Epochs'):
         detection_head.train()
         epoch_loss_list = []
 
-        for embeddings, ground_truths in tqdm(train_set, desc='Training', leave=False):
+        for embeddings, ground_truths in tqdm(train_set, desc='-> Training', leave=False):
             embeddings = embeddings.to(device)
             ground_truths = ground_truths.to(device).float().unsqueeze(1)  # Make sure targets are float for BCELoss
 
@@ -68,7 +68,7 @@ def detection_head_training(nb_epochs, detection_head, train_set, test_set, retu
         with torch.no_grad():
             score = 0
             total = 0
-            for embeddings, ground_truths in tqdm(test_set, desc='Testing', leave=False):
+            for embeddings, ground_truths in tqdm(test_set, desc='-> Testing', leave=False):
                 embeddings = embeddings.to(device)
                 ground_truths = ground_truths.to(device)
 
@@ -105,13 +105,11 @@ def training_main():
     dataset for 10 epochs and the training curve is plotted. The test accuracy, the 
     confusion matrix and the trained head are saved.
     """
-    dataset_generator = cross_validation_datasets_generator(test_proportion=0.2)
+    dataset_generator = list(cross_validation_datasets_generator(test_proportion=0.2))
 
     latest_test_accuracy = 100.0
-    most_challenging_dataset = None
     latest_test_accuracy_list = []
-    challenging_idx = 0
-    for idx, (train_set, test_set) in tqdm(enumerate(dataset_generator), desc='Looping through datasets', leave=False):
+    for train_set, test_set in tqdm(dataset_generator, desc='Looping through datasets', leave=False):
         detection_head = Psd_Pred_MLP_Head(device=device, feat_dim=feat_dim)
         detection_head.to(device)
         test_accuracy = detection_head_training(nb_epochs=1, 
@@ -122,14 +120,12 @@ def training_main():
         latest_test_accuracy_list.append(test_accuracy)
         print(f'-Test accuracy: {test_accuracy}')
         if test_accuracy < latest_test_accuracy: # type: ignore
-        
-            most_challenging_dataset = (train_set, test_set)
             latest_test_accuracy = test_accuracy
-            challenging_idx = idx
-            print(f'-Latest test accuracy: {latest_test_accuracy}')
-            
-    assert most_challenging_dataset is not None, "No dataset was selected as the most challenging."
-    print(f'-Challenging dataset: {challenging_idx}, worst test accuracy: {latest_test_accuracy}')
+    
+    challenging_idx = np.argmin(latest_test_accuracy_list)
+    challenging_train_set, challenging_test_set = next((train_set, test_set) for i, (train_set, test_set) in enumerate(dataset_generator) if i==challenging_idx)  
+    assert challenging_train_set is not None, "No dataset was selected as the most challenging."
+    print(f'-Challenging dataset: {challenging_idx}, worst test accuracy: {min(latest_test_accuracy_list)}')
 
     plt.figure(figsize=(10,5))
     plt.scatter([i for i in range(len(latest_test_accuracy_list))], latest_test_accuracy_list)
@@ -140,11 +136,9 @@ def training_main():
     ax.set_ylim(0, 105)
     plt.show()
 
-    challenging_train_set, challenging_test_set = most_challenging_dataset # type: ignore
-    print(f'-Datasets: {len(challenging_train_set)}, {len(challenging_test_set)}')
     detection_head = Psd_Pred_MLP_Head(device=device, feat_dim=feat_dim)
     detection_head.to(device)
-    nb_epochs = 10
+    nb_epochs = 50
     loss_list, prediction_list, test_accuracies, head_weights = detection_head_training(nb_epochs=nb_epochs, # type: ignore
                                                                         detection_head=detection_head, 
                                                                         train_set=challenging_train_set, 

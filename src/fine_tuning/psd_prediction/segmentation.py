@@ -13,13 +13,6 @@ from src.perso_utils import get_fnames, load_image
 from src.analysis_utils import resize_hdf_image
 
 
-print('-Loading model weights...')
-classification_head = Psd_Pred_MLP_Head(device=device, feat_dim=feat_dim)
-classification_head.load_state_dict(torch.load(os.path.join(model_weights_path, 'psd_head_weights.pt')))
-classification_head.eval()
-print('...done loading model')
-
-
 print('-Loading embeddings...')
 
 _IMAGE_EMBEDDINGS = torch.load(os.path.join(embeddings_path, 'small_dataset_embs_518.pt'))
@@ -38,7 +31,14 @@ file_names, _ = zip(*get_fnames())
 DATA = list(zip(file_names, IMAGE_EMBEDDINGS))
 
 def segmented_image_generator():
-    for file_name, image in tqdm(DATA[:50], total=len(DATA), desc='Segmenting', leave=False):
+    
+    print('-Loading model weights...')
+    classification_head = Psd_Pred_MLP_Head(device=device, feat_dim=feat_dim)
+    classification_head.load_state_dict(torch.load(os.path.join(model_weights_path, 'psd_head_weights.pt')))
+    classification_head.eval()
+    print('...done loading model')
+    
+    for file_name, image in tqdm(DATA, total=len(DATA), desc='Segmenting', leave=False):
         flattened_image = image.reshape(-1, feat_dim).to(device)
         with torch.no_grad():
             predictions = classification_head(flattened_image)

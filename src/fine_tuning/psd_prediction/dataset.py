@@ -6,7 +6,7 @@ import random
 from torch.utils.data import Dataset
 import torch.utils.data as utils
 from tqdm import tqdm
-from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.metrics.pairwise import cosine_similarity, euclidean_distances
 from timeit import default_timer as timer
 
 from src.DinoPsd import DinoPsd_pipeline
@@ -18,7 +18,7 @@ from src.setup import embeddings_path, feat_dim
 print('-Loading embeddings')
 
 _EMBEDDINGS = torch.load(os.path.join(embeddings_path, 'small_dataset_embs_518.pt'))
-_EMBEDDINGS = _EMBEDDINGS[:10]
+_EMBEDDINGS = _EMBEDDINGS
 EMBEDDINGS=[]
 for e in _EMBEDDINGS:
     EMBEDDINGS.extend(e)
@@ -31,16 +31,30 @@ print('...done loading embeddings')
 
 PSD_list, REST_list = [], []
 
-nb_best_patches = 20
+nb_best_patches = 1
 
-for image in tqdm(EMBEDDINGS, desc='Comparing embeddings to reference'):
+for image in tqdm(EMBEDDINGS, desc='-> Comparing embeddings to reference'):
+    H_patch, W_patch, _ = image.shape  # patch grid size
     flattened_image = image.reshape(-1, feat_dim)
-    similarity_matrix = cosine_similarity(REFS, flattened_image)
-    flat_similarities = np.unique(similarity_matrix.ravel())
-    top_10_flat_indices = flat_similarities.argsort()[-nb_best_patches:][::-1]
-    best_indices = np.unravel_index(top_10_flat_indices, similarity_matrix.shape)[1]
-    PSD_list.extend(flattened_image[best_indices])
-    REST_list.extend(np.delete(flattened_image, best_indices, axis=0))
+
+    # Compute similarity
+    similarity_matrix = euclidean_distances(REFS, flattened_image)
+
+    # Get top K matches
+    flat_similarities = similarity_matrix.ravel()
+    top_flat_indices = flat_similarities.argsort()[:nb_best_patches]
+
+    # Map to (ref_idx, patch_idx)
+    ref_indices, patch_indices = np.unravel_index(top_flat_indices, similarity_matrix.shape)
+
+    # Save top and rest patches
+    PSD_list.extend(flattened_image[patch_indices])
+
+    mask = np.ones(flattened_image.shape[0], dtype=bool)
+    mask[np.unique(patch_indices)] = False
+    REST_list.extend(flattened_image[mask])
+    
+assert len(PSD_list) + len(REST_list) == len(EMBEDDINGS)*H_patch*W_patch
 
 PSD = torch.from_numpy(np.array(PSD_list))
 
@@ -89,6 +103,7 @@ class Custom_Detection_Dataset(Dataset):
 
         self.DATASET = self.psd + self.rest
         
+        random.shuffle(self.DATASET)
         self.SPLIT = int(len(self.DATASET) * self.test_proportion)
         self.TRAINING_SET = self.DATASET[self.SPLIT:]
         self.TEST_SET = self.DATASET[:self.SPLIT]

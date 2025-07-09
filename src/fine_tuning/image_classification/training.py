@@ -78,7 +78,9 @@ def head_training(epochs, training_set, test_set):
 
 
 if __name__ == '__main__':
-    training_set, test_set = get_dataset(crop_size=210)
+    crop_size = 98
+    training_set, test_set = get_dataset(crop_size=crop_size)
+    print(f'-Cropping size: {crop_size}')
     
     nb_epochs = 10
     loss_list, prediction_list, test_accuracies = head_training(

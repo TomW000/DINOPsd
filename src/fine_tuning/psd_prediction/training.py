@@ -3,6 +3,7 @@ from torch import nn
 from tqdm import tqdm
 import numpy as np
 import os 
+import umap
 import matplotlib.pyplot as plt
 
 from .head import Psd_Pred_MLP_Head
@@ -17,6 +18,12 @@ from src.setup import device, feat_dim, model_weights_path
 # TODO: Add negative anchors
 # TODO: plot similarity histogram
 # TODO: how about splitting the dataset wrt euclidian distance to any reference vectors
+
+
+#UMAP
+reducer = umap.UMAP(random_state=42)
+
+
 
 def detection_head_training(nb_epochs, detection_head, train_set, test_set, return_statistics):
 
@@ -68,7 +75,20 @@ def detection_head_training(nb_epochs, detection_head, train_set, test_set, retu
         with torch.no_grad():
             score = 0
             total = 0
+            
+            
+            #UMAP
+            UMAP_LIST, UMAP_LABELS = [], []
+            
+            
             for embeddings, ground_truths in tqdm(test_set, desc='-> Testing', leave=False):
+                
+                
+                #UMAP:
+                UMAP_LIST.extend(embeddings)
+                UMAP_LABELS.extend(ground_truths)
+                
+                
                 embeddings = embeddings.to(device)
                 ground_truths = ground_truths.to(device)
 
@@ -78,13 +98,19 @@ def detection_head_training(nb_epochs, detection_head, train_set, test_set, retu
                     predicted_idx = torch.round(output)
                     true_idx = gt
                     assert type(predicted_idx) == type(true_idx), "predicted_idx and true_idx must be of the same type"
-                    
+
                     prediction_list.append([predicted_idx, true_idx])
 
                     if predicted_idx == true_idx:
                         score += 1
                     total += 1
 
+
+            #UMAP
+            UMAP_EMBEDDINGS = reducer.fit_transform(UMAP_LIST)
+            plt.scatter(UMAP_EMBEDDINGS[:, 0], UMAP_EMBEDDINGS[:, 1], c=UMAP_LABELS)
+            
+            
             batch_score = 100 * score / total if total > 0 else 0
             test_accuracies.append(batch_score)
 
@@ -92,7 +118,7 @@ def detection_head_training(nb_epochs, detection_head, train_set, test_set, retu
 
     if return_statistics:
         return loss_list, prediction_list, test_accuracies, detection_head.state_dict()
-            
+
     else:
         return test_accuracies[-1]
 
@@ -105,7 +131,7 @@ def training_main():
     dataset for 10 epochs and the training curve is plotted. The test accuracy, the 
     confusion matrix and the trained head are saved.
     """
-    dataset_generator = list(cross_validation_datasets_generator(test_proportion=0.2))
+    dataset_generator = list(cross_validation_datasets_generator(test_proportion=0.2))[:2]
 
     latest_test_accuracy = 100.0
     latest_test_accuracy_list = []
@@ -152,3 +178,7 @@ def training_main():
     #                 split='test')
 
     torch.save(obj=head_weights, f=os.path.join(model_weights_path, 'psd_head_weights.pt'))
+    
+
+if __name__ == '__main__':
+    training_main()

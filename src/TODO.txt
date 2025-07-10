@@ -2,3 +2,4 @@
 -Add embedding computation to fine-tuning pipeline 
 -Try with giant DINOv2
 -Data augmentation??
+-Add umap to pixel classification

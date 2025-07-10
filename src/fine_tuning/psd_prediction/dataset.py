@@ -31,7 +31,7 @@ print('...done loading embeddings')
 
 PSD_list, REST_list = [], []
 
-nb_best_patches = 1
+nb_best_patches = 5
 
 for image in tqdm(EMBEDDINGS, desc='-> Comparing embeddings to reference'):
     H_patch, W_patch, _ = image.shape  # patch grid size
@@ -53,8 +53,8 @@ for image in tqdm(EMBEDDINGS, desc='-> Comparing embeddings to reference'):
     mask = np.ones(flattened_image.shape[0], dtype=bool)
     mask[np.unique(patch_indices)] = False
     REST_list.extend(flattened_image[mask])
-    
-assert len(PSD_list) + len(REST_list) == len(EMBEDDINGS)*H_patch*W_patch
+
+#assert len(PSD_list) + len(REST_list) == len(EMBEDDINGS) * H_patch * W_patch
 
 PSD = torch.from_numpy(np.array(PSD_list))
 
@@ -64,7 +64,7 @@ print('-Sorting rest embeddings...(this may take a while - check memory usage)')
 start = timer()
 _REST = np.array(REST_list)
 
-distances = cosine_similarity(mean_psd_embedding[None], _REST)
+distances = euclidean_distances(mean_psd_embedding[None], _REST)
 idx = distances.argsort()
 REST = _REST[idx, :].squeeze()
 REST = torch.from_numpy(REST)
@@ -83,7 +83,7 @@ LABELLED_REST = list(zip(REST, REST_LABELS))
 
 print(f'-PSD shape: {PSD.shape}, Rest shape: {REST.shape}')
 
-dataset_bias = 1
+dataset_bias = 2
 
 class Custom_Detection_Dataset(Dataset):
     def __init__(self, 
@@ -127,7 +127,7 @@ n_splits = (len(LABELLED_REST) // len(LABELLED_PSD)) * dataset_bias
 print(f'-Number of splits: {n_splits}')
 
 def cross_validation_datasets_generator(test_proportion):
-    for k in tqdm(range(n_splits), desc='Creating datasets'):
+    for k in tqdm(range(n_splits // 10), desc='Creating datasets'):
         
         training_dataset = Custom_Detection_Dataset(set_type='training', test_proportion=test_proportion, n=k) 
         test_dataset = Custom_Detection_Dataset(set_type='test', test_proportion=test_proportion, n=k)

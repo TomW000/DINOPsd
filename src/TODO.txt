@@ -1,0 +1,4 @@
+-Try field of view 
+-Add embedding computation to fine-tuning pipeline 
+-Try with giant DINOv2
+-Data augmentation??

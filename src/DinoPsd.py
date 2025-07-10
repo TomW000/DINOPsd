@@ -7,6 +7,9 @@ from .DinoPsd_utils import resizeLongestSide, mirror_border, crop_data_with_over
 #----------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 
+image_size = 1120
+
+
 class DinoPsd_pipeline:
     """A pipeline for computing and managing DINOSim.
 

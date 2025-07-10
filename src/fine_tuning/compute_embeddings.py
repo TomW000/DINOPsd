@@ -1,9 +1,9 @@
-from setup import neurotransmitters, model_size, device, feat_dim, resize_size, curated_idx, few_shot_transforms, embeddings_path, model
-from setup import tqdm, torch, np, os, gc, tqdm
-from analysis_utils import resize_hdf_image, get_augmented_coordinates
-from perso_utils import get_fnames, load_image
-from DinoPsd import DinoPsd_pipeline
-from DinoPsd_utils import get_img_processing_f
+from src.setup import neurotransmitters, model_size, device, feat_dim, resize_size, curated_idx, few_shot_transforms, embeddings_path, model
+from src.setup import tqdm, torch, np, os, gc, tqdm
+from src.analysis_utils import resize_hdf_image, get_augmented_coordinates
+from src.perso_utils import get_fnames, load_image
+from src.DinoPsd import DinoPsd_pipeline
+from src.DinoPsd_utils import get_img_processing_f
 
 
 few_shot = DinoPsd_pipeline(model,
@@ -110,7 +110,7 @@ def compute_ref_embeddings(saved_ref_embeddings=False,
             return ref_embs
         
         
-def embedding_generator(batch_size=50): # TODO: if other batch_size, change in get_d_closed_elements!!!!!
+def embedding_generator(batch_size=50):
         
         files, _ = zip(*get_fnames()) 
         images = np.array([resize_hdf_image(load_image(file)[0]) for file in tqdm(files, desc='Loading images')])
@@ -137,3 +137,7 @@ def compute_embeddings(batch_size=50):
         new_embeddings = torch.cat(embeddings_list)
         torch.save(embeddings_list, os.path.join(embeddings_path, f'{model_size}_dataset_embs_{resize_size}.pt'))
         return embeddings_list
+    
+    
+if __name__ == '__main__':
+    compute_embeddings()

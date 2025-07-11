@@ -20,12 +20,7 @@ from src.setup import device, feat_dim, model_weights_path
 # TODO: how about splitting the dataset wrt euclidian distance to any reference vectors
 
 
-#UMAP
-reducer = umap.UMAP(random_state=42)
-
-
-
-def detection_head_training(nb_epochs, detection_head, train_set, test_set, return_statistics):
+def detection_head_training(nb_epochs, detection_head, train_set, test_set, return_statistics, use_umap, plot_index):
 
     """
     Train a detection head using the provided training and testing datasets.
@@ -44,6 +39,10 @@ def detection_head_training(nb_epochs, detection_head, train_set, test_set, retu
             float: The test accuracy of the final epoch.
     """
 
+    #UMAP
+    if use_umap:
+        reducer = umap.UMAP(random_state=42)
+
     loss_list = []
     prediction_list = []
     test_accuracies = []
@@ -51,7 +50,7 @@ def detection_head_training(nb_epochs, detection_head, train_set, test_set, retu
     optimizer = torch.optim.Adam(detection_head.parameters(), lr=3e-4)
     loss_fn = nn.BCELoss()
 
-    for _ in tqdm(range(nb_epochs), desc='--> Epochs'):
+    for epoch in tqdm(range(nb_epochs), desc='--> Epochs'):
         detection_head.train()
         epoch_loss_list = []
 
@@ -76,21 +75,22 @@ def detection_head_training(nb_epochs, detection_head, train_set, test_set, retu
             score = 0
             total = 0
             
-            
             #UMAP
-            UMAP_LIST, UMAP_LABELS = [], []
-            
-            
+            if use_umap and epoch == 0:
+                UMAP_LIST, UMAP_LABELS = [], []
+                UMAP_EMBEDDINGS = []
+                
             for embeddings, ground_truths in tqdm(test_set, desc='-> Testing', leave=False):
                 
-                
-                #UMAP:
-                UMAP_LIST.extend(embeddings)
-                UMAP_LABELS.extend(ground_truths)
-                
+                if use_umap and epoch == 0:    
+                    #UMAP:
+                    UMAP_LIST.extend(embeddings)
+                    UMAP_LABELS.extend(ground_truths)
+                    
                 
                 embeddings = embeddings.to(device)
                 ground_truths = ground_truths.to(device)
+                
 
                 outputs = detection_head(embeddings)
 
@@ -104,17 +104,30 @@ def detection_head_training(nb_epochs, detection_head, train_set, test_set, retu
                     if predicted_idx == true_idx:
                         score += 1
                     total += 1
-
-
-            #UMAP
-            UMAP_EMBEDDINGS = reducer.fit_transform(UMAP_LIST)
-            plt.scatter(UMAP_EMBEDDINGS[:, 0], UMAP_EMBEDDINGS[:, 1], c=UMAP_LABELS)
-            
-            
+                    
             batch_score = 100 * score / total if total > 0 else 0
             test_accuracies.append(batch_score)
 
-        detection_head.train()
+
+    #UMAP
+    if use_umap:
+        UMAP_EMBEDDINGS = reducer.fit_transform(UMAP_LIST)
+
+        plt.clf()
+        unique_labels = np.unique(UMAP_LABELS)
+        
+        colors = plt.cm.bwr(np.linspace(0,1,len(unique_labels)))
+        for i, label in enumerate(unique_labels):
+            mask = UMAP_LABELS == label
+            if label == 0:
+                plot_label = 'Rest'
+            else:
+                plot_label = 'PSD'
+            plt.scatter(UMAP_EMBEDDINGS[mask, 0], UMAP_EMBEDDINGS[mask, 1], c=[colors[i]], s=0.5, label=plot_label, marker='o')
+        plt.legend()
+        plt.title(f'UMAP {plot_index} - accuracy: {batch_score}')
+        plt.savefig(os.path.join('/home/tomwelch/Cambridge/Figures', f'UMAP_{batch_score:.2f}.png'))
+
 
     if return_statistics:
         return loss_list, prediction_list, test_accuracies, detection_head.state_dict()
@@ -131,18 +144,20 @@ def training_main():
     dataset for 10 epochs and the training curve is plotted. The test accuracy, the 
     confusion matrix and the trained head are saved.
     """
-    dataset_generator = list(cross_validation_datasets_generator(test_proportion=0.2))[:2]
+    dataset_generator = list(cross_validation_datasets_generator(test_proportion=0.2))
 
     latest_test_accuracy = 100.0
     latest_test_accuracy_list = []
-    for train_set, test_set in tqdm(dataset_generator, desc='Looping through datasets', leave=False):
+    for k, (train_set, test_set) in tqdm(enumerate(dataset_generator), desc='Looping through datasets', leave=False):
         detection_head = Psd_Pred_MLP_Head(device=device, feat_dim=feat_dim)
         detection_head.to(device)
         test_accuracy = detection_head_training(nb_epochs=1, 
                                                 detection_head=detection_head,
                                                 train_set=train_set, 
                                                 test_set=test_set, 
-                                                return_statistics=False) # type: ignore
+                                                return_statistics=False,
+                                                use_umap=False,  
+                                                plot_index=k) # type: ignore
         latest_test_accuracy_list.append(test_accuracy)
         print(f'-Test accuracy: {test_accuracy}')
         if test_accuracy < latest_test_accuracy: # type: ignore
@@ -159,8 +174,8 @@ def training_main():
     plt.ylabel('Test accuracy')
     plt.title(f'Test accuracy per dataset - number of PSD patches per image={nb_best_patches} - dataset bias={dataset_bias}')
     ax = plt.gca()
-    ax.set_ylim(0, 105)
-    plt.show()
+    ax.set_ylim(0, 105) 
+    #plt.savefig(os.path.join('/home/tomwelch/Cambridge/Figures', 'test_accuraciy_per_dataset.png')) #TODO: CHANGE BACK
 
     detection_head = Psd_Pred_MLP_Head(device=device, feat_dim=feat_dim)
     detection_head.to(device)
@@ -168,17 +183,18 @@ def training_main():
     loss_list, prediction_list, test_accuracies, head_weights = detection_head_training(nb_epochs=nb_epochs, # type: ignore
                                                                         detection_head=detection_head, 
                                                                         train_set=challenging_train_set, 
-                                                                        test_set=challenging_test_set, 
-                                                                        return_statistics=True)
+                                                                        test_set=challenging_test_set,
+                                                                        return_statistics=True,
+                                                                        use_umap=False, 
+                                                                        plot_index=challenging_idx)
 
     training_curve(nb_epochs, loss_list, test_accuracies)
-    #confusion_matrix(data_type='psd',
-    #                 prediction_list=prediction_list, 
-    #                 nb_epochs=nb_epochs,
-    #                 split='test')
+    confusion_matrix(data_type='psd',
+                     prediction_list=prediction_list, 
+                     nb_epochs=nb_epochs,
+                     split='test')
 
-    torch.save(obj=head_weights, f=os.path.join(model_weights_path, 'psd_head_weights.pt'))
-    
+    #torch.save(obj=head_weights, f=os.path.join(model_weights_path, 'psd_head_weights.pt')) #TODO: CHANGE BACK
 
 if __name__ == '__main__':
     training_main()

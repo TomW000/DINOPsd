@@ -31,7 +31,7 @@ print('...done loading embeddings')
 
 PSD_list, REST_list = [], []
 
-nb_best_patches = 5
+nb_best_patches = 1
 
 for image in tqdm(EMBEDDINGS, desc='-> Comparing embeddings to reference'):
     H_patch, W_patch, _ = image.shape  # patch grid size
@@ -83,7 +83,7 @@ LABELLED_REST = list(zip(REST, REST_LABELS))
 
 print(f'-PSD shape: {PSD.shape}, Rest shape: {REST.shape}')
 
-dataset_bias = 2
+dataset_bias = 1
 
 class Custom_Detection_Dataset(Dataset):
     def __init__(self, 
@@ -122,12 +122,12 @@ class Custom_Detection_Dataset(Dataset):
 
 train_batch_size, test_batch_size = 50, 50
 
-n_splits = (len(LABELLED_REST) // len(LABELLED_PSD)) * dataset_bias
+n_splits = (len(LABELLED_REST) // len(LABELLED_PSD))
 
 print(f'-Number of splits: {n_splits}')
 
 def cross_validation_datasets_generator(test_proportion):
-    for k in tqdm(range(n_splits // 10), desc='Creating datasets'):
+    for k in tqdm(range(n_splits//10), desc='Creating datasets'):
         
         training_dataset = Custom_Detection_Dataset(set_type='training', test_proportion=test_proportion, n=k) 
         test_dataset = Custom_Detection_Dataset(set_type='test', test_proportion=test_proportion, n=k)

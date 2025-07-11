@@ -127,7 +127,7 @@ n_splits = (len(LABELLED_REST) // len(LABELLED_PSD))
 print(f'-Number of splits: {n_splits}')
 
 def cross_validation_datasets_generator(test_proportion):
-    for k in tqdm(range(n_splits//10), desc='Creating datasets'):
+    for k in tqdm(range(25), desc='Creating datasets'):
         
         training_dataset = Custom_Detection_Dataset(set_type='training', test_proportion=test_proportion, n=k) 
         test_dataset = Custom_Detection_Dataset(set_type='test', test_proportion=test_proportion, n=k)

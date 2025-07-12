@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 from torch.utils.data import TensorDataset, DataLoader
 
 from .head import Psd_Pred_MLP_Head
-from .dataset import cross_validation_datasets_generator, nb_best_patches, dataset_bias
+from .dataset import cross_validation_datasets_generator, sliding_window_datasets_generator, nb_best_patches, len_psd 
 from src.fine_tuning.display_results import training_curve, confusion_matrix
 
 from src.setup import device, feat_dim, model_weights_path
@@ -137,10 +137,17 @@ def detection_head_training(nb_epochs, detection_head, train_set, test_set, retu
         return test_accuracies[-1]
 
 
-def rolling_window_dataset_generator(train_inputs, train_targets, test_inputs, test_targets, window_width):
+def rolling_window_dataset_generator(train_inputs, train_targets, test_inputs, test_targets, window_width, stride):
     
-    for 
+    window_width = 100
+    for i in range(0, len(train_inputs) - window_width, stride):
+        start = i
+        end = i + window_width
+        
     
+    filtered_train_dataset = TensorDataset(train_inputs, train_targets)
+    filtered_test_dataset = TensorDataset(test_inputs, test_targets)
+
     yield DataLoader(filtered_train_dataset, batch_size=50, shuffle=True), DataLoader(filtered_test_dataset, batch_size=50, shuffle=True)
 
 
@@ -172,12 +179,11 @@ def training_main():
         if test_accuracy < latest_test_accuracy: # type: ignore
             latest_test_accuracy = test_accuracy
 
-
     plt.figure(figsize=(10,5))
     plt.scatter([i for i in range(len(latest_test_accuracy_list))], latest_test_accuracy_list)
     plt.xlabel('Datasets')
     plt.ylabel('Test accuracy')
-    plt.title(f'Test accuracies on entire dataset - number of PSD patches per image={nb_best_patches} - dataset bias={dataset_bias}')
+    plt.title(f'Test accuracies on entire dataset - number of PSD patches per image={nb_best_patches}')
     plt.axhline(y=80, color='r', linestyle='--', label='Threshold')
     ax = plt.gca()
     ax.set_ylim(0, 105) 
@@ -203,36 +209,59 @@ def training_main():
     for i, (train_loader, test_loader) in enumerate(dataset_generator):
         if i in below_threshold_indices:
             for batch in train_loader:
-                inputs, targets = batch
-                train_inputs.append(inputs)
-                train_targets.append(targets)
+                for input, target in batch:
+                    if target == 0:
+                        train_inputs.append(input)
+                        train_targets.append(target)
 
             for batch in test_loader:
-                inputs, targets = batch
-                test_inputs.append(inputs)
-                test_targets.append(targets)
+                for input, target in batch:
+                    if target == 0:
+                        test_inputs.append(input)
+                        test_targets.append(target)
 
-    # Concatenate all batches
-    train_inputs = torch.cat(train_inputs)
-    train_targets = torch.cat(train_targets)
+    dataset_generator.clear()
 
-    test_inputs = torch.cat(test_inputs)
-    test_targets = torch.cat(test_targets)
-
-    # Create datasets and loaders
-    diversified_train_dataset = TensorDataset(train_inputs, train_targets)
-    diversified_test_dataset = TensorDataset(test_inputs, test_targets)
-
-    diversified_train_set = DataLoader(diversified_train_dataset, batch_size=50, shuffle=True)
-    diversified_test_set = DataLoader(diversified_test_dataset, batch_size=50, shuffle=True)
-
+    inputs = np.concatenate([train_inputs, test_inputs])
+    targets = np.concatenate([train_targets, test_targets])
     
-    
-    assert diversified_train_set and diversified_test_set is not None, "No dataset was selected."
+    FILTERED_LABELLED_REST_SET = list(zip(inputs, targets))
+
+    assert FILTERED_LABELLED_REST_SET is not None, "No filtered dataset was selected."
     print(f'-Challenging dataset: {most_challenging_idx}, worst test accuracy: {min(latest_test_accuracy_list)}')
     print(f'-Easiest dataset: {best_idx}, worst test accuracy: {max(latest_test_accuracy_list)}')
 
-    
+
+    filtered_dataset_generator = list(sliding_window_datasets_generator(FILTERED_REST_SET=FILTERED_LABELLED_REST_SET, 
+                                                               test_proportion=0.2, 
+                                                               window_size=100, 
+                                                               stride=10))
+
+    latest_test_accuracy_list = []
+    for train_set, test_set in tqdm(filtered_dataset_generator, desc='Looping through filtered datasets', leave=False):
+        detection_head = Psd_Pred_MLP_Head(device=device, feat_dim=feat_dim)
+        detection_head.to(device)
+        test_accuracy = detection_head_training(nb_epochs=1, 
+                                                detection_head=detection_head,
+                                                train_set=train_set, 
+                                                test_set=test_set, 
+                                                return_statistics=False,
+                                                use_umap=False)
+        latest_test_accuracy_list.append(test_accuracy)
+        print(f'-Test accuracy: {test_accuracy}')
+
+    plt.figure(figsize=(10,5))
+    plt.scatter([i for i in range(len(latest_test_accuracy_list))], latest_test_accuracy_list)
+    plt.xlabel('Datasets')
+    plt.ylabel('Test accuracy')
+    plt.title(f'Test accuracies on entire dataset - number of PSD patches per image={nb_best_patches}')
+    plt.axhline(y=80, color='r', linestyle='--', label='Threshold')
+    ax = plt.gca()
+    ax.set_ylim(0, 105) 
+    #plt.savefig(os.path.join('/home/tomwelch/Cambridge/Figures', 'test_accuraciy_per_dataset.png')) #TODO: CHANGE BACK
+
+
+
     detection_head = Psd_Pred_MLP_Head(device=device, feat_dim=feat_dim)
     detection_head.to(device)
     nb_epochs = 50

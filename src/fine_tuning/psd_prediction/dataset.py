@@ -14,6 +14,11 @@ from src.DinoPsd_utils import get_img_processing_f
 
 from src.setup import embeddings_path, feat_dim
 
+#------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+#------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+# LOADING DATA:
+#------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+#------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 print('-Loading embeddings')
 
@@ -73,6 +78,7 @@ end = timer()
 print(f'...done sorting rest embeddings - it took {end-start:.2f} seconds')
 
 PSD_LABELS = torch.ones(PSD.shape[0])
+len_psd = len(PSD)
 
 REST_LABELS = torch.zeros((REST.shape[0]))
 
@@ -83,13 +89,18 @@ LABELLED_REST = list(zip(REST, REST_LABELS))
 
 print(f'-PSD shape: {PSD.shape}, Rest shape: {REST.shape}')
 
-dataset_bias = 1
+#------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+#------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+# GENERATING BASE DATASETS:
+#------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+#------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 class Custom_Detection_Dataset(Dataset):
     def __init__(self, 
                  set_type,
                  test_proportion,
-                 n):
+                 n, 
+                 dataset_bias = 1):
         
         assert set_type in {'training', 'test'}, 'set_type must be either training or test'
         
@@ -119,7 +130,6 @@ class Custom_Detection_Dataset(Dataset):
     def __getitem__(self, idx):
         return self.data[idx]
 
-
 train_batch_size, test_batch_size = 50, 50
 
 n_splits = (len(LABELLED_REST) // len(LABELLED_PSD))
@@ -132,4 +142,76 @@ def cross_validation_datasets_generator(test_proportion):
         training_dataset = Custom_Detection_Dataset(set_type='training', test_proportion=test_proportion, n=k) 
         test_dataset = Custom_Detection_Dataset(set_type='test', test_proportion=test_proportion, n=k)
         
+        yield utils.DataLoader(training_dataset, batch_size=train_batch_size, shuffle=True), utils.DataLoader(test_dataset, batch_size=test_batch_size, shuffle=True)
+
+
+#------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+#------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+# GENERATING SLIDING-WINDOW DATASETS:
+#------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+#------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+class Custom_Sliding_Window_Dataset(Dataset):
+    def __init__(self,
+                 FILTERED_REST_SET,
+                 set_type,
+                 test_proportion,
+                 start,
+                 end, 
+                 dataset_bias = 1):
+        
+        assert set_type in {'training', 'test'}, 'set_type must be either training or test'
+        
+        self.set_type = set_type
+        self.test_proportion = test_proportion
+
+        self.psd = LABELLED_PSD 
+        self.len_psd = len(self.psd) // dataset_bias
+        
+        self.rest = FILTERED_REST_SET[start:end]
+
+        self.DATASET = self.psd + self.rest
+        
+        random.shuffle(self.DATASET)
+        self.SPLIT = int(len(self.DATASET) * self.test_proportion)
+        self.TRAINING_SET = self.DATASET[self.SPLIT:]
+        self.TEST_SET = self.DATASET[:self.SPLIT]
+
+        if set_type == 'training':
+            self.data = self.TRAINING_SET
+        elif set_type == 'test':
+            self.data = self.TEST_SET
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        return self.data[idx]
+
+train_batch_size, test_batch_size = 50, 50
+
+sliding_window_nb_splits = (len(LABELLED_REST) // len(LABELLED_PSD))
+
+print(f'-Number of splits: {sliding_window_nb_splits}')
+
+def sliding_window_datasets_generator(FILTERED_REST_SET, test_proportion, window_size, stride):
+    for k in tqdm(range(0, len(FILTERED_REST_SET) - window_size, stride), desc='Creating sliding-window datasets'):
+        
+        start = k
+        end = k + window_size
+        
+        training_dataset = Custom_Sliding_Window_Dataset(FILTERED_REST_SET=FILTERED_REST_SET,
+                                                         set_type='training',
+                                                         test_proportion=test_proportion,
+                                                         start=start,
+                                                         end=end, 
+                                                         dataset_bias = 1)
+        
+        test_dataset = Custom_Sliding_Window_Dataset(FILTERED_REST_SET=FILTERED_REST_SET,
+                                                         set_type='test',
+                                                         test_proportion=test_proportion,
+                                                         start=start,
+                                                         end=end, 
+                                                         dataset_bias = 1)
+
         yield utils.DataLoader(training_dataset, batch_size=train_batch_size, shuffle=True), utils.DataLoader(test_dataset, batch_size=test_batch_size, shuffle=True)

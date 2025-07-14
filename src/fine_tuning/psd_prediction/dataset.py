@@ -27,7 +27,7 @@ _EMBEDDINGS = _EMBEDDINGS
 EMBEDDINGS=[]
 for e in _EMBEDDINGS:
     EMBEDDINGS.extend(e)
-EMBEDDINGS = EMBEDDINGS[:1000]
+EMBEDDINGS = EMBEDDINGS
 
 REFS = torch.load(os.path.join(embeddings_path, 'small_mean_ref_518_Aug=False_k=10.pt'), weights_only=False)
 
@@ -59,7 +59,7 @@ for image in tqdm(EMBEDDINGS, desc='-> Comparing embeddings to reference'):
     mask[np.unique(patch_indices)] = False
     REST_list.extend(flattened_image[mask])
 
-#assert len(PSD_list) + len(REST_list) == len(EMBEDDINGS) * H_patch * W_patch
+assert len(PSD_list) + len(REST_list) == len(EMBEDDINGS) * H_patch * W_patch
 
 PSD = torch.from_numpy(np.array(PSD_list))
 
@@ -78,7 +78,6 @@ end = timer()
 print(f'...done sorting rest embeddings - it took {end-start:.2f} seconds')
 
 PSD_LABELS = torch.ones(PSD.shape[0])
-len_psd = len(PSD)
 
 REST_LABELS = torch.zeros((REST.shape[0]))
 
@@ -91,125 +90,226 @@ print(f'-PSD shape: {PSD.shape}, Rest shape: {REST.shape}')
 
 #------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 #------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-# GENERATING BASE DATASETS:
+# DEFINING CUSTOM DATASETS AND DATASET GENERATORS:
 #------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 #------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-class Custom_Detection_Dataset(Dataset):
-    def __init__(self, 
-                 set_type,
-                 test_proportion,
-                 n, 
-                 dataset_bias = 1):
-        
-        assert set_type in {'training', 'test'}, 'set_type must be either training or test'
-        
-        self.set_type = set_type
-        self.test_proportion = test_proportion
-
-        self.psd = LABELLED_PSD 
-        self.len_psd = len(self.psd) // dataset_bias
-        
-        self.rest = LABELLED_REST[self.len_psd * n :self.len_psd * (n+1)]
-
-        self.DATASET = self.psd + self.rest
-        
-        self.SPLIT = int(len(self.DATASET) * self.test_proportion)
-        self.TRAINING_SET = self.DATASET[self.SPLIT:]
-        self.TEST_SET = self.DATASET[:self.SPLIT]
-
-        if set_type == 'training':
-            random.shuffle(self.TRAINING_SET)
-            self.data = self.TRAINING_SET
-        elif set_type == 'test':
-            random.shuffle(self.TEST_SET)
-            self.data = self.TEST_SET
-
-    def __len__(self):
-        return len(self.data)
-
-    def __getitem__(self, idx):
-        return self.data[idx]
-
-train_batch_size, test_batch_size = 50, 50
-
-n_splits = (len(LABELLED_REST) // len(LABELLED_PSD))
-
-print(f'-Number of splits: {n_splits}')
-
-def cross_validation_datasets_generator(test_proportion):
-    for k in tqdm(range(25), desc='Creating datasets'):
-        
-        training_dataset = Custom_Detection_Dataset(set_type='training', test_proportion=test_proportion, n=k) 
-        test_dataset = Custom_Detection_Dataset(set_type='test', test_proportion=test_proportion, n=k)
-        
-        yield utils.DataLoader(training_dataset, batch_size=train_batch_size, shuffle=True), utils.DataLoader(test_dataset, batch_size=test_batch_size, shuffle=True)
-
-
-#------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-#------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-# GENERATING SLIDING-WINDOW DATASETS:
-#------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-#------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-
-class Custom_Sliding_Window_Dataset(Dataset):
+class Custom_Dataset(Dataset):
     def __init__(self,
-                 FILTERED_REST_SET,
-                 set_type,
-                 test_proportion,
-                 start,
-                 end, 
-                 dataset_bias = 1):
+                 LABELLED_PSD: list = LABELLED_PSD,
+                 sliding_window: bool = False,
+                 stride: int = 100,
+                 FILTERED_REST_SET: list[any, any] | None = None,
+                 set_type: str = 'training',
+                 test_proportion: float = 0.2,
+                 n: int = 0,
+                 dataset_bias: int = 1, 
+                 seed: int = 42):
         
+        # Set random seed for reproducibility
+        """
+        __init__ method for Custom_Dataset class.
+        
+        Parameters
+        ----------
+        sliding_window : bool, optional
+            Whether to use a sliding window for selecting REST data. Defaults to False.
+        stride : int, optional
+            Stride of sliding window. Defaults to 100.
+        FILTERED_REST_SET : list[any, any] | None, optional
+            List of filtered REST data. Defaults to None.
+        set_type : str, optional
+            Type of dataset to generate. Must be either 'training' or 'test'. Defaults to 'training'.
+        test_proportion : float, optional
+            Proportion of data to use for testing. Defaults to 0.2.
+        n : int, optional
+            Index of fold to use for training or testing. Defaults to 0.
+        dataset_bias : int, optional
+            Bias to apply to PSD data. Defaults to 1.
+        seed : int, optional
+            Random seed for reproducibility. Defaults to 42.
+        """
+        random.seed(seed)
+        
+        # Validate inputs
         assert set_type in {'training', 'test'}, 'set_type must be either training or test'
+        assert 0 < test_proportion < 1, 'test_proportion must be between 0 and 1'
+        assert dataset_bias > 0, 'dataset_bias must be positive'
+        assert stride > 0, 'stride must be positive'
+        
+        if sliding_window and FILTERED_REST_SET is None:
+            raise ValueError("FILTERED_REST_SET must be provided when sliding_window=True")
         
         self.set_type = set_type
         self.test_proportion = test_proportion
+        self.sliding_window = sliding_window
+        self.stride = stride
+        self.n = n
 
-        self.psd = LABELLED_PSD 
-        self.len_psd = len(self.psd) // dataset_bias
+        # Process PSD data 
+        self.len_psd = len(LABELLED_PSD) // dataset_bias
         
-        self.rest = FILTERED_REST_SET[start:end]
+        # Select REST data based on mode
+        if sliding_window:
+            window_size = self.len_psd
+            start_idx = n * stride
+            end_idx = min(n * stride + window_size, len(FILTERED_REST_SET))
+            
+            # Validate window bounds
+            if start_idx >= len(FILTERED_REST_SET):
+                raise IndexError(f"Window start index {start_idx} exceeds FILTERED_REST_SET length {len(FILTERED_REST_SET)}")
+            
+            self.rest = FILTERED_REST_SET[start_idx:end_idx]
+        else:   
+            start_idx = self.len_psd * n
+            end_idx = min(self.len_psd * (n+1), len(LABELLED_REST))
+            
+            # Validate fold bounds
+            if start_idx >= len(LABELLED_REST):
+                raise IndexError(f"Fold start index {start_idx} exceeds LABELLED_REST length {len(LABELLED_REST)}")
+            
+            self.rest = LABELLED_REST[start_idx:end_idx]
 
+        # Combine and shuffle dataset
         self.DATASET = self.psd + self.rest
+        random.shuffle(self.DATASET)
         
+        # Split into training and test sets
         self.SPLIT = int(len(self.DATASET) * self.test_proportion)
         self.TRAINING_SET = self.DATASET[self.SPLIT:]
         self.TEST_SET = self.DATASET[:self.SPLIT]
 
-        if set_type == 'training':
-            random.shuffle(self.TRAINING_SET)
-            self.data = self.TRAINING_SET
-        elif set_type == 'test':
-            random.shuffle(self.TEST_SET)
-            self.data = self.TEST_SET
+        # Select appropriate dataset
+        self.data = self.TRAINING_SET if set_type == 'training' else self.TEST_SET
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.data)
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx: int):
         return self.data[idx]
+    
+    def get_class_distribution(self) -> dict[int, int]:
+        """Return the distribution of classes in the current dataset"""
+        labels = [item[1].item() if isinstance(item[1], torch.Tensor) else item[1] for item in self.data]
+        unique, counts = np.unique(labels, return_counts=True)
+        return dict(zip(unique.astype(int), counts))
+    
+    def get_dataset_info(self) -> dict[str, any]:
+        """Return comprehensive information about the dataset"""
+        class_dist = self.get_class_distribution()
+        return {
+            'set_type': self.set_type,
+            'total_samples': len(self.data),
+            'psd_samples': len(self.psd),
+            'rest_samples': len(self.rest),
+            'class_distribution': class_dist,
+            'test_proportion': self.test_proportion,
+            'sliding_window': self.sliding_window,
+            'window_number': self.n,
+            'stride': self.stride if self.sliding_window else None
+        }
+    
+    def get_balance_ratio(self) -> float:
+        """Return the ratio of positive to negative samples"""
+        class_dist = self.get_class_distribution()
+        pos_count = class_dist.get(1, 0)
+        neg_count = class_dist.get(0, 0)
+        return pos_count / neg_count if neg_count > 0 else float('inf')
 
-train_batch_size, test_batch_size = 50, 50
 
-def sliding_window_datasets_generator(FILTERED_REST_SET, test_proportion, window_size, stride):
-    for k in tqdm(range(0, len(FILTERED_REST_SET) - window_size, stride), desc='Creating sliding-window datasets'):
-        
-        start = k
-        end = k + window_size
-        
-        training_dataset = Custom_Sliding_Window_Dataset(FILTERED_REST_SET=FILTERED_REST_SET,
-                                                         set_type='training',
-                                                         test_proportion=test_proportion,
-                                                         start=start,
-                                                         end=end, 
-                                                         dataset_bias = 1)
-        
-        test_dataset = Custom_Sliding_Window_Dataset(FILTERED_REST_SET=FILTERED_REST_SET,
-                                                         set_type='test',
-                                                         test_proportion=test_proportion,
-                                                         start=start,
-                                                         end=end, 
-                                                         dataset_bias = 1)
+# Updated generator functions
+def cross_validation_datasets_generator(test_proportion: float = 0.2, seed: int = 42):
+    """Generate cross-validation datasets"""
+    n_splits = len(LABELLED_REST) // len(LABELLED_PSD)
+    
+    for k in range(n_splits//10):
+        try:
+            training_dataset = Custom_Dataset(
+                LABELLED_PSD=LABELLED_PSD,
+                sliding_window=False,
+                set_type='training',
+                test_proportion=test_proportion,
+                n=k,
+                seed=seed
+            )
+            
+            test_dataset = Custom_Dataset(
+                LABELLED_PSD=LABELLED_PSD,
+                sliding_window=False,
+                set_type='test',
+                test_proportion=test_proportion,
+                n=k,
+                seed=seed
+            )
+            
+            train_loader = torch.utils.data.DataLoader(training_dataset, batch_size=50, shuffle=True)
+            test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=50, shuffle=False)
+            
+            yield train_loader, test_loader, training_dataset.get_dataset_info()
+            
+        except IndexError as e:
+            print(f"Skipping fold {k}: {e}")
+            continue
 
-        yield utils.DataLoader(training_dataset, batch_size=train_batch_size, shuffle=True), utils.DataLoader(test_dataset, batch_size=test_batch_size, shuffle=True)
+
+def sliding_window_datasets_generator(FILTERED_REST_SET: list, 
+                                    test_proportion: float = 0.2, 
+                                    stride: int = 100, 
+                                    seed: int = 42):
+    """Generate sliding window datasets"""
+    
+    # Calculate number of windows
+    window_size = len(LABELLED_PSD)
+    max_windows = (len(FILTERED_REST_SET) - window_size) // stride + 1
+    
+    for k in range(max_windows):
+        try:
+            training_dataset = Custom_Dataset(
+                LABELLED_PSD=LABELLED_PSD,
+                sliding_window=True,
+                stride=stride,
+                FILTERED_REST_SET=FILTERED_REST_SET,
+                set_type='training',
+                test_proportion=test_proportion,
+                n=k,
+                seed=seed
+            )
+            
+            test_dataset = Custom_Dataset(
+                LABELLED_PSD=LABELLED_PSD,
+                sliding_window=True,
+                stride=stride,
+                FILTERED_REST_SET=FILTERED_REST_SET,
+                set_type='test',
+                test_proportion=test_proportion,
+                n=k,
+                seed=seed
+            )
+            
+            train_loader = torch.utils.data.DataLoader(training_dataset, batch_size=50, shuffle=True)
+            test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=50, shuffle=False)
+            
+            yield train_loader, test_loader, training_dataset.get_dataset_info()
+            
+        except IndexError as e:
+            print(f"Skipping window {k}: {e}")
+            continue
+
+'''
+# Example usage and testing
+if __name__ == "__main__":
+    # Test cross-validation
+    print("Cross-validation datasets:")
+    for i, (train_loader, test_loader, info) in enumerate(cross_validation_datasets_generator(0.2)):
+        print(f"Fold {i}: {info}")
+        if i >= 2:  # Just show first 3 folds
+            break
+    
+    # Test sliding window (assuming FILTERED_REST_SET is defined)
+    # print("\nSliding window datasets:")
+    # for i, (train_loader, test_loader, info) in enumerate(sliding_window_datasets_generator(
+    #     FILTERED_REST_SET, test_proportion=0.2, stride=100)):
+    #     print(f"Window {i}: {info}")
+    #     if i >= 2:  # Just show first 3 windows
+    #         break
+'''

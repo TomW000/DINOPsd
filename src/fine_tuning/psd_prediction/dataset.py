@@ -27,7 +27,7 @@ _EMBEDDINGS = _EMBEDDINGS
 EMBEDDINGS=[]
 for e in _EMBEDDINGS:
     EMBEDDINGS.extend(e)
-
+EMBEDDINGS = EMBEDDINGS[:1000]
 
 REFS = torch.load(os.path.join(embeddings_path, 'small_mean_ref_518_Aug=False_k=10.pt'), weights_only=False)
 
@@ -114,14 +114,15 @@ class Custom_Detection_Dataset(Dataset):
 
         self.DATASET = self.psd + self.rest
         
-        random.shuffle(self.DATASET)
         self.SPLIT = int(len(self.DATASET) * self.test_proportion)
         self.TRAINING_SET = self.DATASET[self.SPLIT:]
         self.TEST_SET = self.DATASET[:self.SPLIT]
 
         if set_type == 'training':
+            random.shuffle(self.TRAINING_SET)
             self.data = self.TRAINING_SET
         elif set_type == 'test':
+            random.shuffle(self.TEST_SET)
             self.data = self.TEST_SET
 
     def __len__(self):
@@ -172,14 +173,15 @@ class Custom_Sliding_Window_Dataset(Dataset):
 
         self.DATASET = self.psd + self.rest
         
-        random.shuffle(self.DATASET)
         self.SPLIT = int(len(self.DATASET) * self.test_proportion)
         self.TRAINING_SET = self.DATASET[self.SPLIT:]
         self.TEST_SET = self.DATASET[:self.SPLIT]
 
         if set_type == 'training':
+            random.shuffle(self.TRAINING_SET)
             self.data = self.TRAINING_SET
         elif set_type == 'test':
+            random.shuffle(self.TEST_SET)
             self.data = self.TEST_SET
 
     def __len__(self):
@@ -189,10 +191,6 @@ class Custom_Sliding_Window_Dataset(Dataset):
         return self.data[idx]
 
 train_batch_size, test_batch_size = 50, 50
-
-sliding_window_nb_splits = (len(LABELLED_REST) // len(LABELLED_PSD))
-
-print(f'-Number of splits: {sliding_window_nb_splits}')
 
 def sliding_window_datasets_generator(FILTERED_REST_SET, test_proportion, window_size, stride):
     for k in tqdm(range(0, len(FILTERED_REST_SET) - window_size, stride), desc='Creating sliding-window datasets'):

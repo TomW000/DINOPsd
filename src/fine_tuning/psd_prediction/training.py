@@ -5,6 +5,7 @@ import numpy as np
 import os 
 import umap
 import matplotlib.pyplot as plt
+from timeit import default_timer as timer
 
 from .head import Psd_Pred_MLP_Head
 from .dataset import dataset_generator, Custom_Dataset, LABELLED_REST, nb_best_patches 
@@ -111,6 +112,7 @@ def detection_head_training(nb_epochs, detection_head, train_set, test_set, retu
 
     #UMAP
     if use_umap:
+        print('Running UMAP')
         UMAP_EMBEDDINGS = reducer.fit_transform(UMAP_LIST)
 
         plt.clf()
@@ -135,10 +137,73 @@ def detection_head_training(nb_epochs, detection_head, train_set, test_set, retu
 
     else:
         return test_accuracies[-1]
-    
+
+def filter_dataset(dataset_generator, only_rest: bool = True,
+                   test_accuracy_list: list[float] = [], 
+                   accuracy_threshold: float = 80.0):
+    """
+    Filter datasets below an accuracy threshold to focus training on more difficult examples.
+    """
+
+    test_accuracy_array = np.array(test_accuracy_list)
+    below_threshold_indices = np.where(test_accuracy_array < accuracy_threshold)[0]
+
+    print(f'Number of datasets below threshold: {len(below_threshold_indices)}')
+
+    most_challenging_idx = int(np.argmin(test_accuracy_array))
+    best_idx = int(np.argmax(test_accuracy_array))
+
+    rest_train_inputs, rest_train_targets = [], []
+    psd_train_inputs = []
+
+    rest_test_inputs, rest_test_targets = [], []
+    psd_test_inputs = []
+
+    for i in below_threshold_indices:
+        train_loader, test_loader, _ = dataset_generator[i]
+
+        # Collect train data
+        for inputs, targets in train_loader:
+            inputs, targets = inputs.cpu(), targets.cpu()
+            with torch.no_grad():
+                mask_rest = targets == 0
+                mask_psd = targets == 1
+
+                if mask_rest.any():
+                    rest_train_inputs.append(inputs[mask_rest])
+                    rest_train_targets.append(targets[mask_rest])
+                if not only_rest and mask_psd.any():
+                    psd_train_inputs.append(inputs[mask_psd])
+
+        # Collect test data
+        for inputs, targets in test_loader:
+            inputs, targets = inputs.cpu(), targets.cpu()
+            with torch.no_grad():
+                mask_rest = targets == 0
+                mask_psd = targets == 1
+
+                if mask_rest.any():
+                    rest_test_inputs.append(inputs[mask_rest])
+                    rest_test_targets.append(targets[mask_rest])
+                if not only_rest and mask_psd.any():
+                    psd_test_inputs.append(inputs[mask_psd])
+
+    print(f'-Challenging dataset: {most_challenging_idx}, worst test accuracy: {test_accuracy_array[most_challenging_idx]}')
+    print(f'-Easiest dataset: {best_idx}, best test accuracy: {test_accuracy_array[best_idx]}')
+
+    if only_rest:
+        all_inputs = torch.cat(rest_train_inputs + rest_test_inputs, dim=0)
+        all_targets = torch.cat(rest_train_targets + rest_test_targets, dim=0)
+        return list(zip(all_inputs, all_targets))
+    else:
+        all_inputs = torch.cat(psd_train_inputs + psd_test_inputs + rest_train_inputs + rest_test_inputs, dim=0)
+        unique_inputs = torch.unique(all_inputs, dim=0)
+        psd_targets = torch.ones(unique_inputs.size(0))
+        return list(zip(unique_inputs, psd_targets))
+
 
     #This returns the datasets below 80% accuracy
-def filter_dataset(dataset_generator, only_rest: bool=True, test_accuracy_list: list[float]=[], accuracy_threshold: float=80.0):
+def sub_optimal_filter_dataset(dataset_generator, only_rest: bool=True, test_accuracy_list: list[float]=[], accuracy_threshold: float=80.0):
 
     """
     This function takes a dataset generator and filters out the datasets with a test accuracy below a certain threshold.
@@ -152,17 +217,15 @@ def filter_dataset(dataset_generator, only_rest: bool=True, test_accuracy_list: 
     Returns:
         list: A new dataset generator containing only the filtered datasets.
     """
-    
+
     accuracy_threshold = 80.0
     latest_test_accuracies = np.array(test_accuracy_list)
     masks = (latest_test_accuracies < accuracy_threshold)
     below_threshold_indices = np.where(masks)[0]
+    print(f'Number of datasets below threshold: {len(below_threshold_indices)}')
 
     most_challenging_idx = np.argmin(test_accuracy_list)
     best_idx = np.argmax(test_accuracy_list)
-
-    if only_rest:
-        thresholded_indices = below_threshold_indices
 
     rest_train_inputs, rest_train_targets = [], []
     psd_train_inputs = []
@@ -171,28 +234,31 @@ def filter_dataset(dataset_generator, only_rest: bool=True, test_accuracy_list: 
     psd_test_inputs = []
 
     for i, (train_loader, test_loader, _) in enumerate(dataset_generator):
-        if i in thresholded_indices:
+        if i in below_threshold_indices:
             for batch in train_loader:
                 inputs, targets = batch
                 for input, target in zip(inputs, targets):
-                    if target == torch.tensor([0.]):
+                    if target.item() == 0.0:
                         rest_train_inputs.append(input)
                         rest_train_targets.append(target)
-                    elif target == torch.tensor([1.]):
+                    elif target.item() == 1.0:
                         psd_train_inputs.append(input)
+                    else:
+                        print(f'Unexpected target value: {target}')
                         
             for batch in test_loader:
                 inputs, targets = batch
                 for input, target in zip(inputs, targets):
-                    if target == torch.tensor([0.]):
+                    if target.item() == 0.0:
                         rest_test_inputs.append(input)
                         rest_test_targets.append(target)
-                    elif target == torch.tensor([1.]):
+                    elif target.item() == 1.0:
                         psd_test_inputs.append(input)
+                    else:
+                        print(f'Unexpected target value: {target}')
 
     if type(dataset_generator) == list:
         dataset_generator.clear() 
-
 
     print(f'-Challenging dataset: {most_challenging_idx}, worst test accuracy: {min(test_accuracy_list)}')
     print(f'-Easiest dataset: {best_idx}, best test accuracy: {max(test_accuracy_list)}')
@@ -202,20 +268,20 @@ def filter_dataset(dataset_generator, only_rest: bool=True, test_accuracy_list: 
         targets = torch.from_numpy(np.concatenate([rest_train_targets, rest_test_targets]))
         
         # this dataset is solely used to perform the second filtering step - otherwise, we could have directly used the original Custom_Dataset
-        FILTERED_LABELLED_REST_SET = list(zip(inputs, targets))
-        assert FILTERED_LABELLED_REST_SET is not None, "No filtered dataset was selected."
+        assert inputs is not None and targets is not None, "No filtered dataset was selected."
         
+        FILTERED_LABELLED_REST_SET = list(zip(inputs, targets))
         return FILTERED_LABELLED_REST_SET
 
     else:
         # below threshold after filtering means actually psd
         psd_inputs = torch.from_numpy(np.concatenate([psd_train_inputs, psd_test_inputs, rest_train_inputs, rest_test_inputs]))
-        psd_targets = torch.ones(psd_inputs.shape[0])
+        unique_inputs = torch.unique(psd_inputs, dim=0)
+        psd_targets = torch.ones(unique_inputs.shape[0])
         
-        FILTERED_LABELLED_PSD_SET = list(zip(psd_inputs, psd_targets))
+        assert psd_inputs is not None and unique_inputs is not None and psd_targets is not None, "No filtered dataset was selected."
         
-        assert FILTERED_LABELLED_PSD_SET is not None, "No filtered dataset was selected."
-        
+        FILTERED_LABELLED_PSD_SET = list(zip(unique_inputs, psd_targets))        
         return FILTERED_LABELLED_PSD_SET
 
 def training_main():
@@ -265,13 +331,13 @@ def training_main():
                                                 test_accuracy_list=latest_test_accuracy_list, 
                                                 accuracy_threshold=80.0)
 
-    filtered_dataset_g = dataset_generator(sliding_window=True,
+    filtered_dataset_g = list(dataset_generator(sliding_window=True,
                                            LABELLED_REST_SET=FILTERED_LABELLED_REST_SET,
                                            test_proportion=0.2,
                                            stride=100,
-                                           train_batch_size=100, 
-                                           test_batch_size=100, 
-                                           seed=42)
+                                           train_batch_size=50, 
+                                           test_batch_size=50, 
+                                           seed=42))
 
     latest_test_accuracy_list = []  
     for train_set, test_set, _ in tqdm(filtered_dataset_g, desc='Looping through filtered datasets', leave=False):
@@ -291,7 +357,7 @@ def training_main():
     plt.xlabel('Datasets')
     plt.ylabel('Test accuracy')
     plt.title(f'Test accuracies on entire dataset - number of PSD patches per image={nb_best_patches}')
-    plt.axhline(y=80, color='r', linestyle='--', label='New threshold')
+    plt.axhline(y=70, color='r', linestyle='--', label='New threshold')
     ax = plt.gca()
     ax.set_ylim(0, 105) 
     plt.legend()
@@ -301,10 +367,10 @@ def training_main():
     AUGMENTED_LABELLED_PSD_SET = filter_dataset(dataset_generator=filtered_dataset_g,
                                           only_rest=False, 
                                           test_accuracy_list=latest_test_accuracy_list, 
-                                          accuracy_threshold=80.0)
+                                          accuracy_threshold=70.0)
     
     EASIEST_LABELLED_REST_SET = LABELLED_REST[-len(AUGMENTED_LABELLED_PSD_SET):] 
-    
+
     print(f'{len(AUGMENTED_LABELLED_PSD_SET)} PSD patches')
     print(f'{len(EASIEST_LABELLED_REST_SET)} rest patches')
     
@@ -328,13 +394,13 @@ def training_main():
     
     detection_head = Psd_Pred_MLP_Head(device=device, feat_dim=feat_dim)
     detection_head.to(device)
-    nb_epochs = 5
+    nb_epochs = 50
     loss_list, prediction_list, test_accuracies, head_weights = detection_head_training(nb_epochs=nb_epochs, # type: ignore
                                                                         detection_head=detection_head, 
                                                                         train_set=train_loader, 
                                                                         test_set=test_loader,
                                                                         return_statistics=True,
-                                                                        use_umap=False)
+                                                                        use_umap=True)
 
     training_curve(nb_epochs, loss_list, test_accuracies)
     confusion_matrix(data_type='psd',

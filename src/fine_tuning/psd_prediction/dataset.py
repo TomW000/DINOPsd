@@ -96,8 +96,8 @@ print(f'-PSD shape: {PSD.shape}, Rest shape: {REST.shape}')
 
 class Custom_Dataset(Dataset):
     def __init__(self,
-                 LABELLED_PSD: list = LABELLED_PSD,
-                 LABELLED_REST: list = LABELLED_REST,
+                 LABELLED_PSD: torch.Tensor = LABELLED_PSD,
+                 LABELLED_REST: torch.Tensor = LABELLED_REST,
                  sliding_window: bool = None,
                  stride: int = 100,
                  set_type: str = 'training',
@@ -201,13 +201,13 @@ class Custom_Dataset(Dataset):
 
 
 def dataset_generator(sliding_window: bool=False,
-                              LABELLED_PSD_SET: list=LABELLED_PSD,
-                              LABELLED_REST_SET: list=LABELLED_REST, 
-                              test_proportion: float=0.2, 
-                              stride: int=100, 
-                              train_batch_size: int=50, 
-                              test_batch_size: int=50,
-                              seed: int = 42):
+                      LABELLED_PSD_SET: list=LABELLED_PSD,
+                      LABELLED_REST_SET: list=LABELLED_REST, 
+                      test_proportion: float=0.2, 
+                      stride: int=100, 
+                      train_batch_size: int=50, 
+                      test_batch_size: int=50,
+                      seed: int = 42):
     """
     A generator of PSD prediction datasets. Either uses a sliding window or non-overlapping folds.
 
@@ -268,7 +268,7 @@ def dataset_generator(sliding_window: bool=False,
     else:
         n_splits =  len(LABELLED_REST_SET) // len(LABELLED_PSD_SET)
 
-        for k in range(n_splits//10):
+        for k in range(n_splits // 10):
             try:
                 training_dataset = Custom_Dataset(
                     LABELLED_PSD=LABELLED_PSD_SET,

@@ -99,7 +99,7 @@ def detection_head_training(nb_epochs, detection_head, train_set, test_set, retu
                     true_idx = gt
                     assert type(predicted_idx) == type(true_idx), "predicted_idx and true_idx must be of the same type"
 
-                    prediction_list.append([predicted_idx, true_idx])
+                    prediction_list.append([int(predicted_idx), int(true_idx)])
 
                     if predicted_idx == true_idx:
                         score += 1
@@ -127,7 +127,7 @@ def detection_head_training(nb_epochs, detection_head, train_set, test_set, retu
         plt.legend()
         plt.title(f'UMAP - accuracy: {batch_score}')
         plt.show()
-        plt.savefig(os.path.join('/home/tomwelch/Cambridge/Figures', f'UMAP_{batch_score:.2f}.png'))
+        #plt.savefig(os.path.join('/home/tomwelch/Cambridge/Figures', f'UMAP_{batch_score:.2f}.png'))
 
 
     if return_statistics:
@@ -258,7 +258,7 @@ def training_main():
     ax.set_ylim(0, 105) 
     plt.legend()
     plt.show()
-    plt.savefig(os.path.join('/home/tomwelch/Cambridge/Figures', 'test_accuracy_per_dataset.png')) #TODO: CHANGE BACK
+    #plt.savefig(os.path.join('/home/tomwelch/Cambridge/Figures', 'test_accuracy_per_dataset.png')) #TODO: CHANGE BACK
 
     FILTERED_LABELLED_REST_SET = filter_dataset(dataset_generator=dataset_g,
                                                 only_rest=True,                                                
@@ -296,7 +296,7 @@ def training_main():
     ax.set_ylim(0, 105) 
     plt.legend()
     plt.show()
-    plt.savefig(os.path.join('/home/tomwelch/Cambridge/Figures', 'test_accuracy_per_filtered_dataset.png')) #TODO: CHANGE BACK
+    #plt.savefig(os.path.join('/home/tomwelch/Cambridge/Figures', 'test_accuracy_per_filtered_dataset.png')) #TODO: CHANGE BACK
     
     AUGMENTED_LABELLED_PSD_SET = filter_dataset(dataset_generator=filtered_dataset_g,
                                           only_rest=False, 
@@ -304,6 +304,9 @@ def training_main():
                                           accuracy_threshold=80.0)
     
     EASIEST_LABELLED_REST_SET = LABELLED_REST[-len(AUGMENTED_LABELLED_PSD_SET):] 
+    
+    print(f'{len(AUGMENTED_LABELLED_PSD_SET)} PSD patches')
+    print(f'{len(EASIEST_LABELLED_REST_SET)} rest patches')
     
     augmemted_training_dataset = Custom_Dataset(
         LABELLED_PSD=AUGMENTED_LABELLED_PSD_SET,
@@ -325,13 +328,13 @@ def training_main():
     
     detection_head = Psd_Pred_MLP_Head(device=device, feat_dim=feat_dim)
     detection_head.to(device)
-    nb_epochs = 50
+    nb_epochs = 5
     loss_list, prediction_list, test_accuracies, head_weights = detection_head_training(nb_epochs=nb_epochs, # type: ignore
                                                                         detection_head=detection_head, 
                                                                         train_set=train_loader, 
                                                                         test_set=test_loader,
                                                                         return_statistics=True,
-                                                                        use_umap=True)
+                                                                        use_umap=False)
 
     training_curve(nb_epochs, loss_list, test_accuracies)
     confusion_matrix(data_type='psd',

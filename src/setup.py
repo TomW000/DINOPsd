@@ -45,25 +45,25 @@ from random import sample
 
 
 #TODO: For LINUX:
-dataset_path = '/home/tomwelch/Cambridge/Datasets/neurotransmitter_data'
+#dataset_path = '/home/tomwelch/Cambridge/Datasets/neurotransmitter_data'
 
 #TODO: For MAC:
-#dataset_path = '/Users/tomw/Documents/MVA/Internship/Cambridge/Datasets/neurotransmitter_data'
+dataset_path = '/Users/tomw/Documents/MVA/Internship/Cambridge/Datasets/neurotransmitter_data'
 
 
 #TODO: For LINUX:
-embeddings_path = '/home/tomwelch/Cambridge/Embeddings'
+#embeddings_path = '/home/tomwelch/Cambridge/Embeddings'
 
 #TODO: For MAC:
-#embeddings_path = '/Users/tomw/Documents/MVA/Internship/Cambridge/Embeddings'
+embeddings_path = '/Users/tomw/Documents/MVA/Internship/Cambridge/Embeddings'
 
 save_path ='/home/tomwelch/Cambridge/Output' 
 
 #TODO: For LINUX:
-model_weights_path = '/home/tomwelch/Cambridge/model_weights'
+#model_weights_path = '/home/tomwelch/Cambridge/model_weights'
 
 #TODO: For MAC:
-#model_weights_path = '/Users/tomw/Documents/MVA/Internship/Cambridge/model_weights'
+model_weights_path = '/Users/tomw/Documents/MVA/Internship/Cambridge/model_weights'
 
 
 dates = sorted(glob(os.path.join(dataset_path, '*')))

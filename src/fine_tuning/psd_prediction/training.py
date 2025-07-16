@@ -389,7 +389,7 @@ def training_main():
         )
     
     train_loader = torch.utils.data.DataLoader(augmemted_training_dataset, batch_size=100, shuffle=True)
-    test_loader = torch.utils.data.DataLoader(augmemted_test_dataset, batch_size=100, shuffle=False)
+    test_loader = torch.utils.data.DataLoader(augmemted_test_dataset, batch_size=100, shuffle=True)
     
     
     detection_head = Psd_Pred_MLP_Head(device=device, feat_dim=feat_dim)

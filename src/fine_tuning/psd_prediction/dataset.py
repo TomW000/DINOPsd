@@ -260,7 +260,7 @@ def dataset_generator(sliding_window: bool=False,
                 continue
                 
             train_loader = torch.utils.data.DataLoader(training_dataset, batch_size=train_batch_size, shuffle=True)
-            test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=test_batch_size, shuffle=False)
+            test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=test_batch_size, shuffle=True)
             
             yield train_loader, test_loader, training_dataset.get_dataset_info()
 
@@ -297,7 +297,7 @@ def dataset_generator(sliding_window: bool=False,
                 continue
 
             train_loader = torch.utils.data.DataLoader(training_dataset, batch_size=train_batch_size, shuffle=True)
-            test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=test_batch_size, shuffle=False)
+            test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=test_batch_size, shuffle=True)
                 
             yield train_loader, test_loader, training_dataset.get_dataset_info()
 

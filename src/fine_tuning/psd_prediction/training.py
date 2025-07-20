@@ -409,6 +409,8 @@ def training_main():
                      split='test')
 
     torch.save(obj=head_weights, f=os.path.join(model_weights_path, 'psd_head_weights.pt')) #TODO: CHANGE BACK
+    
+    return train_loader, test_loader
 
-if __name__ == '__main__':
-    training_main()
+
+train_loader, test_loader = training_main()

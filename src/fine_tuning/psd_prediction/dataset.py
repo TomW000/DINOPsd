@@ -27,7 +27,7 @@ _EMBEDDINGS = _EMBEDDINGS
 EMBEDDINGS=[]
 for e in _EMBEDDINGS:
     EMBEDDINGS.extend(e)
-EMBEDDINGS = EMBEDDINGS
+EMBEDDINGS = EMBEDDINGS[:1000]
 
 REFS = torch.load(os.path.join(embeddings_path, 'small_mean_ref_518_Aug=False_k=10.pt'), weights_only=False)
 

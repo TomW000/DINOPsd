@@ -73,8 +73,8 @@ def add_context_to_embeddings(path, delta): # delta should be an even number
         
         return weighted_embeddings, augmented_ref
 
-def resize_hdf_image(img):
-    image = torch.from_numpy(img)
+def resize_hdf_image(image, resize_size):
+    image = torch.from_numpy(image)
     resized_image = Trans.Resize(size=resize_size, interpolation=torchvision.transforms.InterpolationMode.BICUBIC, antialias=True)(image).permute(1,2,0).numpy()
     return resized_image
 
@@ -83,8 +83,8 @@ def resize_tiff_image(img):
     resized_image = Trans.Resize(size=(resize_size, resize_size), interpolation=torchvision.transforms.InterpolationMode.BICUBIC, antialias=True)(image).permute(1,2,0).numpy()
     return resized_image
 
-def display_hdf_image_grid(img):
-    resized_image = resize_hdf_image(img)
+def display_hdf_image_grid(image, resize_size):
+    resized_image = resize_hdf_image(image, resize_size)
     plt.figure(figsize=(10,10), dpi=100)
     plt.imshow(resized_image, cmap='grey')
     plt.xticks([i for i in range(0,resize_size, model.patch_size)])

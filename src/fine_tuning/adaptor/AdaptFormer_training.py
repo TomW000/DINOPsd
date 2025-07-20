@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 import numpy as np
-import tqdm.notebook as tqdm
+from tqdm import tqdm
 
 from .AdaptFormer import augmented_model, device 
 from .AdaptFormer_dataset import ft_training_loader, ft_test_loader 

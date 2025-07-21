@@ -29,7 +29,7 @@ class Psd_Pred_MLP_Head(nn.Module):
                                    nn.ReLU(),
                                    nn.Linear(self.hidden_dims[2],
                                              self.nb_outputs),
-                                   nn.Sigmoid()) #FIXME: dim?
+                                   nn.Sigmoid()) #FIXME: d?
 
         self.apply(init_model)
         self.to(self.device)

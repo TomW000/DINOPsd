@@ -43,7 +43,7 @@ from itertools import chain
 from random import sample
 
 
-OS = "mac"
+OS = "linux"
 
 if OS == "linux":
     dataset_path = '/home/tomwelch/Cambridge/Datasets/neurotransmitter_data'

@@ -30,7 +30,7 @@ _EMBEDDINGS = torch.load(os.path.join(embeddings_path, 'small_dataset_embs_518.p
 EMBEDDINGS=[]
 for e in _EMBEDDINGS:
     EMBEDDINGS.extend(e)
-EMBEDDINGS = EMBEDDINGS[:2]
+EMBEDDINGS = EMBEDDINGS
 
 REFS = torch.load(os.path.join(embeddings_path, 'small_mean_ref_518_Aug=False_k=10.pt'), weights_only=False)
 
@@ -38,11 +38,12 @@ print('...done loading embeddings')
 
 nb_best_patches = 1
 
-def get_dataset(nb_best_patches: int = 1,
-                resize_size:int = 518, 
-                padding_size:int = 1, 
-                test_proportion:float = 0.2,
-                batch_size:int = 1): # padding_size should be an odd number
+def get_data_generator(split: str = 'training', 
+                       nb_best_patches: int = 1,
+                       resize_size:int = 518, 
+                       padding_size:int = 1, 
+                       test_proportion:float = 0.2,
+                       seed:int = 42): # padding_size should be an odd number
     
     patch_size = model.patch_size # type: ignore 
 
@@ -50,19 +51,43 @@ def get_dataset(nb_best_patches: int = 1,
 
     files, _ = zip(*get_fnames())
 
-    DATASET = []
+    random.seed(seed)
 
-    for k, file in tqdm(enumerate(files), desc='Loading patches'):
+    DATASET = list(zip(files, EMBEDDINGS))
+    random.shuffle(DATASET)
+    SPLIT = int(len(DATASET) * test_proportion)
+    TRAINING_SET = DATASET[SPLIT:]
+    TEST_SET = DATASET[:SPLIT]
+
+    list_iterator = TRAINING_SET if split == 'training' else TEST_SET
+
+    for file, embeddings in tqdm(list_iterator, total=len(list_iterator), desc='Loading patches'):
         PATCHES = []
         image, _, _ = load_image(file)
         resized_image = resize_hdf_image(image, resize_size=resize_size).squeeze()
-        x, y = resized_image.shape
+        H_size, W_size = resized_image.shape
+        H_patch, W_patch = H_size // patch_size, W_size // patch_size
         
-        H_patch, W_patch = resized_image.shape
-        flattened_image = resized_image.reshape(-1, feat_dim)
+        padding = padding_size * patch_size
+        
+        for i in range(0, H_size, patch_size):
+            start_h = max(i - padding, 0)
+            end_h = min(i + padding + patch_size, H_size)
+            for j in range(0, W_size, patch_size):
+                start_w = max(j - padding, 0)
+                end_w = min(j + padding + patch_size, W_size)
+                
+                patch = resized_image[start_h:end_h, start_w:end_w][...,None]
+                stack = np.concatenate([patch, patch, patch], axis=2)
+                stack = stack.transpose(2,0,1)[None]
+                stack = torch.from_numpy(stack)
+                PATCHES.append(stack)
+        
+        
+        flattened_embeddings = embeddings.reshape(-1, feat_dim)
 
         # Compute similarity
-        similarity_matrix = euclidean_distances(REFS, flattened_image)
+        similarity_matrix = euclidean_distances(REFS, flattened_embeddings)
 
         # Get top K matches
         flat_similarities = similarity_matrix.ravel()
@@ -71,57 +96,16 @@ def get_dataset(nb_best_patches: int = 1,
         # Map to (ref_idx, patch_idx)
         ref_indices, patch_indices = np.unravel_index(top_flat_indices, similarity_matrix.shape)
 
-        y_coord = patch_indices // H_patch
-        x_coord = patch_indices % W_patch
+        h_patch_coord = patch_indices // W_patch
+        w_patch_coord = patch_indices % W_patch
         
-        gt_y_start_idx = y_coord * patch_size
-        gt_y_end_idx = (y_coord + 1) * patch_size
+        gt_h_start_idx = (h_patch_coord * patch_size).item()
+        gt_h_end_idx = ((h_patch_coord + 1) * patch_size).item()
 
-        gt_x_start_idx = x_coord * patch_size
-        gt_x_end_idx = (x_coord + 1) * patch_size
-        
-        GT = torch.zeros((y, x))
-        GT[gt_y_start_idx:gt_y_end_idx, gt_x_start_idx:gt_x_end_idx] = torch.ones((patch_size, patch_size))
+        gt_w_start_idx = (w_patch_coord * patch_size).item()
+        gt_w_end_idx = ((w_patch_coord + 1) * patch_size).item()
 
+        GT = torch.zeros((H_size, W_size))
+        GT[gt_h_start_idx:gt_h_end_idx, gt_w_start_idx:gt_w_end_idx] = torch.ones((patch_size, patch_size))
 
-        padding = padding_size * patch_size
-        
-        for i in range(0, x, patch_size):
-            start_x = max(i - padding, 0)
-            end_x = min(i + padding + patch_size, x)
-            for j in range(0, y, patch_size):
-                start_y = max(j - padding, 0)
-                end_y = min(j + padding + patch_size, y)
-                
-                patch = resized_image[start_x:end_x, start_y:end_y][...,None]
-                stack = np.concatenate([patch, patch, patch], axis=2)
-                stack = stack.transpose(2,0,1)[None]
-                PATCHES.append(stack)
-                
-        DATASET.append([PATCHES, GT])
-
-    random.shuffle(DATASET)
-
-    nb_images = len(DATASET)
-
-    SPLIT = int(nb_images*test_proportion)
-    TRAINING_SET = DATASET[SPLIT:]
-    TEST_SET = DATASET[:SPLIT]
-
-    training_dataset = Custom_Dataset(TRAINING_SET) 
-    test_dataset = Custom_Dataset(TEST_SET)
-
-    training_loader = utils.DataLoader(training_dataset, batch_size=batch_size)
-    test_loader = utils.DataLoader(test_dataset, batch_size=batch_size)
-
-    return training_loader, test_loader
-
-
-class Custom_Dataset(Dataset):
-    def __init__(self,
-                 SET):
-        self.data = SET
-    def __len__(self):
-        return len(self.data)
-    def __getitem__(self, idx):
-        return self.data[idx]
+        yield PATCHES, GT

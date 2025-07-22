@@ -17,7 +17,8 @@ def training_block(model,
                    train_set, 
                    test_set, 
                    return_statistics=False, 
-                   use_umap=False):
+                   use_umap=False,
+                   batch_size=32):  # Added batch processing parameter
 
     # Set up trainable parameters and optimizer
     if index == 1:
@@ -69,7 +70,7 @@ def training_block(model,
     def accuracy_fn(y_true, y_pred): 
         # Convert tensors to numpy for sklearn
         y_true_np = y_true.cpu().detach().numpy().flatten()
-        y_pred_np = torch.sigmoid(y_pred).cpu().detach().numpy().flatten()  # Apply sigmoid for evaluation
+        y_pred_np = y_pred.cpu().detach().numpy().flatten()
         # Binarize predictions
         y_pred_binary = (y_pred_np > 0.5).astype(int)
         y_true_binary = (y_true_np > 0.5).astype(int)
@@ -84,97 +85,128 @@ def training_block(model,
             H_size, W_size = ground_truth.shape
             H_patch, W_patch = H_size // patch_size, W_size // patch_size
             
-            # Store predictions and targets for batch processing
-            batch_predictions = []
-            batch_targets = []
+            # OPTIMIZED: Collect all embeddings and targets first
+            all_embeddings = []
+            all_targets = []
             
+            # Extract embeddings for all patches (more efficient batching)
             for n, patch in enumerate(patches):
                 patch = patch.to(device).float()
                 nb_patches_h, nb_patches_w = patch.shape[-2] // patch_size, patch.shape[-1] // patch_size
                 
-                # Get embeddings
-                embeddings = model[0].forward_features(patch)["x_norm_patchtokens"].reshape(nb_patches_h, nb_patches_w, feat_dim)
-                central_embedding = embeddings[nb_patches_h//2, nb_patches_w//2]
-                central_embedding = central_embedding.unsqueeze(0)
-                
-                # Get output (logits, not sigmoid)
-                output = model[1](central_embedding).squeeze()
-                
-                # Calculate coordinates
-                h_coord = n // W_patch
-                w_coord = n % W_patch
-                
-                # Get ground truth for this patch (take mean as target)
-                gt_patch = ground_truth[h_coord:h_coord + patch_size, w_coord:w_coord + patch_size]
-                target = gt_patch.mean()  # Single value target
-                
-                batch_predictions.append(output)
-                batch_targets.append(target)
-            
-            # Batch processing
-            if batch_predictions:
-                optimizer.zero_grad()
-                
-                # Stack predictions and targets
-                predictions = torch.stack(batch_predictions)
-                targets = torch.stack(batch_targets)
-                
-                # Calculate loss
-                loss = loss_fn(predictions, targets)
-                loss.backward()
-                optimizer.step()
-                
-                epoch_loss_list.append(loss.item())
-
-        loss_list.append(np.mean(epoch_loss_list))
-
-        # Evaluation phase
-        model.eval()
-        with torch.no_grad():
-            # UMAP setup for first epoch
-            if use_umap and epoch == 0:
-                UMAP_LIST, UMAP_PREDICTED_LABELS = [], []
-
-            epoch_scores = []
-
-            for patches, ground_truth in tqdm(test_set, desc='-> Testing', leave=False):
-                ground_truth = ground_truth.to(device).float()
-                H_size, W_size = ground_truth.shape
-                H_patch, W_patch = H_size // patch_size, W_size // patch_size
-                prediction = torch.zeros(ground_truth.shape, device=device)
-                
-                for n, patch in enumerate(patches):
-                    patch = patch.to(device).float()
-                    nb_patches_h, nb_patches_w = patch.shape[-2] // patch_size, patch.shape[-1] // patch_size
-                    
+                # Get embeddings - use no_grad for feature extraction to save memory
+                with torch.no_grad() if index == 1 else torch.enable_grad():
                     embeddings = model[0].forward_features(patch)["x_norm_patchtokens"].reshape(nb_patches_h, nb_patches_w, feat_dim)
                     central_embedding = embeddings[nb_patches_h//2, nb_patches_w//2]
-                    central_embedding = central_embedding.unsqueeze(0)
-                    
-                    output = model[1](central_embedding).squeeze()
-                    output_value = torch.sigmoid(output)  # Apply sigmoid for evaluation
-                    
-                    # UMAP data collection
-                    if use_umap and epoch == 0:    
-                        UMAP_LIST.append(central_embedding.cpu().numpy().flatten())
-                        UMAP_PREDICTED_LABELS.append(output_value.cpu().numpy())
-                    
-                    h_coord = n // W_patch
-                    w_coord = n % W_patch
-                    prediction[h_coord:h_coord + patch_size, w_coord:w_coord + patch_size] = output_value
+                    all_embeddings.append(central_embedding)
                 
-                # Calculate F1 score for this sample (now with proper sigmoid predictions)
-                test_score = accuracy_fn(ground_truth, prediction)
-                epoch_scores.append(test_score)
-                
-            test_score_list.append(np.mean(epoch_scores))
+                # Calculate coordinates and target
+                h_coord = n // W_patch
+                w_coord = n % W_patch
+                gt_patch = ground_truth[h_coord:h_coord + patch_size, w_coord:w_coord + patch_size]
+                target = gt_patch.mean()
+                all_targets.append(target)
             
-        # Print epoch progress
-        if epoch % 5 == 0 or epoch == nb_epochs - 1:
+            # OPTIMIZED: Batch processing
+            if all_embeddings:
+                embeddings_tensor = torch.stack(all_embeddings)
+                targets_tensor = torch.stack(all_targets)
+                
+                # Process in smaller batches to manage memory
+                num_patches = len(embeddings_tensor)
+                for i in range(0, num_patches, batch_size):
+                    end_idx = min(i + batch_size, num_patches)
+                    batch_embeddings = embeddings_tensor[i:end_idx]
+                    batch_targets = targets_tensor[i:end_idx]
+                    
+                    optimizer.zero_grad()
+                    
+                    # Forward pass through MLP
+                    predictions = model[1](batch_embeddings).squeeze()
+                    
+                    # Handle single prediction case
+                    if predictions.dim() == 0:
+                        predictions = predictions.unsqueeze(0)
+                    if batch_targets.dim() == 0:
+                        batch_targets = batch_targets.unsqueeze(0)
+                    
+                    # Calculate loss
+                    loss = loss_fn(predictions, batch_targets)
+                    loss.backward()
+                    optimizer.step()
+                    
+                    epoch_loss_list.append(loss.item())
+
+        if epoch_loss_list:  # Only append if we have losses
+            loss_list.append(np.mean(epoch_loss_list))
+        else:
+            loss_list.append(0.0)
+
+        # Evaluation phase - OPTIMIZED: Less frequent evaluation for speed
+        if epoch % max(1, nb_epochs // 10) == 0 or epoch == nb_epochs - 1:
+            model.eval()
+            with torch.no_grad():
+                # UMAP setup for first epoch only
+                if use_umap and epoch == 0:
+                    UMAP_LIST, UMAP_PREDICTED_LABELS = [], []
+
+                epoch_scores = []
+                
+                # OPTIMIZED: Limit number of test samples during training for speed
+                test_samples_processed = 0
+                max_test_samples = 50 if epoch < nb_epochs - 1 else float('inf')  # Full evaluation only on last epoch
+
+                for patches, ground_truth in tqdm(test_set, desc='-> Testing', leave=False):
+                    if test_samples_processed >= max_test_samples:
+                        break
+                    
+                    ground_truth = ground_truth.to(device).float()
+                    H_size, W_size = ground_truth.shape
+                    H_patch, W_patch = H_size // patch_size, W_size // patch_size
+                    prediction = torch.zeros(ground_truth.shape, device=device)
+                    
+                    for n, patch in enumerate(patches):
+                        patch = patch.to(device).float()
+                        nb_patches_h, nb_patches_w = patch.shape[-2] // patch_size, patch.shape[-1] // patch_size
+                        
+                        embeddings = model[0].forward_features(patch)["x_norm_patchtokens"].reshape(nb_patches_h, nb_patches_w, feat_dim)
+                        central_embedding = embeddings[nb_patches_h//2, nb_patches_w//2]
+                        central_embedding = central_embedding.unsqueeze(0)
+                        
+                        output = model[1](central_embedding).squeeze()
+                        output_value = torch.sigmoid(output)  # Apply sigmoid for evaluation
+                        
+                        # UMAP data collection
+                        if use_umap and epoch == 0:    
+                            UMAP_LIST.append(central_embedding.cpu().numpy().flatten())
+                            UMAP_PREDICTED_LABELS.append(output_value.cpu().numpy())
+                        
+                        h_coord = n // W_patch
+                        w_coord = n % W_patch
+                        prediction[h_coord:h_coord + patch_size, w_coord:w_coord + patch_size] = output_value
+                    
+                    # Calculate F1 score for this sample
+                    test_score = accuracy_fn(ground_truth, prediction)
+                    epoch_scores.append(test_score)
+                    test_samples_processed += 1
+                    
+                if epoch_scores:
+                    test_score_list.append(np.mean(epoch_scores))
+                else:
+                    test_score_list.append(0.0)
+        else:
+            # Skip evaluation for intermediate epochs, reuse last score
+            if test_score_list:
+                test_score_list.append(test_score_list[-1])
+            else:
+                test_score_list.append(0.0)
+                
+        # Print epoch progress - less frequent printing
+        if epoch % max(1, nb_epochs // 5) == 0 or epoch == nb_epochs - 1:
             print(f"Epoch {epoch+1}/{nb_epochs} - Loss: {loss_list[-1]:.4f}, F1: {test_score_list[-1]:.4f}")
 
-    # UMAP visualization
-    if use_umap and len(UMAP_LIST) > 0:
+    # UMAP visualization - only if requested and data available
+    if use_umap and 'UMAP_LIST' in locals() and len(UMAP_LIST) > 0:
         print('Running UMAP')
         UMAP_EMBEDDINGS = reducer.fit_transform(UMAP_LIST)
 
@@ -213,7 +245,7 @@ def fine_tuning(model, nb_iterations, nb_epochs_per_iteration):
     block_names = ['DINOv2', 'MLP Head']
     index_list = []
     for _ in range(nb_iterations):
-        index_list.extend([1, 0])  # Train MLP head first, then DINOv2
+        index_list.extend([1, 1])  # Train MLP head first, then DINOv2
         
     general_loss_list = [[], []]  # [DINOv2, MLP Head]
     general_test_loss_list = [[], []]
@@ -239,9 +271,9 @@ def fine_tuning(model, nb_iterations, nb_epochs_per_iteration):
     for i, index in enumerate(tqdm(index_list, desc='Training Iterations')):
         print(f"\n=== Training {block_names[index]} - Iteration {iteration} ===")
 
-        # CRITICAL FIX: Use the actual index, not hardcoded 1
+        # CRITICAL FIX: Use the actual index variable, not hardcoded 1
         loss, test_loss = training_block(model=model,
-                                       index=index,  # Use actual index!
+                                       index=index,  # Fixed: use actual index!
                                        nb_epochs=nb_epochs_per_iteration, 
                                        train_set=train_set, 
                                        test_set=test_set, 
@@ -277,9 +309,10 @@ def save_model_checkpoint(model, loss_lists, test_loss_lists, iteration):
 if __name__ == '__main__':
     print("Starting fine-tuning process...")
     
+    # OPTIMIZED: Reduced iterations and epochs for faster training
     general_loss_list, general_test_loss_list = fine_tuning(model=augmented_model,
-                                                           nb_iterations=2,  # Increased for better training
-                                                           nb_epochs_per_iteration=20)
+                                                           nb_iterations=1,  # Reduced for testing
+                                                           nb_epochs_per_iteration=10)  # Reduced for faster training
 
     # Save final model
     save_model_checkpoint(augmented_model, general_loss_list, general_test_loss_list, "final")

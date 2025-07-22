@@ -31,7 +31,7 @@ for praram in head.parameters():
 
 
 class AdaptMLP(nn.Module):
-    def __init__(self, device, original_mlp, in_dim, mid_dim, dropout=0.0, s=0.1):
+    def __init__(self, device, original_mlp, in_dim, mid_dim, dropout=0.0, s=0.0): # TODO: CHANGE DEPENDING ON TASK
         super().__init__()
         
         self.device = device

@@ -9,6 +9,7 @@ from sklearn.metrics import f1_score
 
 from src.setup import model, device, model_weights_path, resize_size, feat_dim
 from src.fine_tuning.adaptor.AdaptFormer import augmented_model
+from src.fine_tuning.display_results import display_segmentation
 from .sliding_window_dataset import get_data_generator
 
 def training_block(model,
@@ -66,7 +67,7 @@ def training_block(model,
     
     # Use BCEWithLogitsLoss for binary classification
     loss_fn = nn.BCEWithLogitsLoss()
-    
+
     def accuracy_fn(y_true, y_pred): 
         # Convert tensors to numpy for sklearn
         y_true_np = y_true.cpu().detach().numpy().flatten()
@@ -80,7 +81,7 @@ def training_block(model,
         model.train()
         epoch_loss_list = []
 
-        for patches, ground_truth in tqdm(train_set, desc='-> Training', leave=False):
+        for file, patches, ground_truth in train_set:
             ground_truth = ground_truth.to(device).float()
             H_size, W_size = ground_truth.shape
             H_patch, W_patch = H_size // patch_size, W_size // patch_size
@@ -131,12 +132,11 @@ def training_block(model,
                         batch_targets = batch_targets.unsqueeze(0)
                     
                     # Calculate loss
-                    loss = loss_fn(predictions, batch_targets)
+                    loss = loss_fn(predictions.cpu(), batch_targets.cpu())
                     loss.backward()
                     optimizer.step()
                     
                     epoch_loss_list.append(loss.item())
-
         if epoch_loss_list:  # Only append if we have losses
             loss_list.append(np.mean(epoch_loss_list))
         else:
@@ -155,8 +155,7 @@ def training_block(model,
                 # OPTIMIZED: Limit number of test samples during training for speed
                 test_samples_processed = 0
                 max_test_samples = 50 if epoch < nb_epochs - 1 else float('inf')  # Full evaluation only on last epoch
-
-                for patches, ground_truth in tqdm(test_set, desc='-> Testing', leave=False):
+                for file, patches, ground_truth in test_set:
                     if test_samples_processed >= max_test_samples:
                         break
                     
@@ -168,23 +167,24 @@ def training_block(model,
                     for n, patch in enumerate(patches):
                         patch = patch.to(device).float()
                         nb_patches_h, nb_patches_w = patch.shape[-2] // patch_size, patch.shape[-1] // patch_size
-                        
                         embeddings = model[0].forward_features(patch)["x_norm_patchtokens"].reshape(nb_patches_h, nb_patches_w, feat_dim)
                         central_embedding = embeddings[nb_patches_h//2, nb_patches_w//2]
                         central_embedding = central_embedding.unsqueeze(0)
                         
-                        output = model[1](central_embedding).squeeze()
-                        output_value = torch.sigmoid(output)  # Apply sigmoid for evaluation
-                        
+                        output = model[1](central_embedding)
+                        output_sigmoid = torch.sigmoid(output.squeeze())
+                        output_value = (output > 0.5).float()
                         # UMAP data collection
                         if use_umap and epoch == 0:    
                             UMAP_LIST.append(central_embedding.cpu().numpy().flatten())
                             UMAP_PREDICTED_LABELS.append(output_value.cpu().numpy())
                         
-                        h_coord = n // W_patch
-                        w_coord = n % W_patch
+                        h_coord = (n // W_patch) * patch_size
+                        w_coord = (n % W_patch) * patch_size
                         prediction[h_coord:h_coord + patch_size, w_coord:w_coord + patch_size] = output_value
-                    
+
+                    display_segmentation(ground_truth.cpu().numpy(), file)
+
                     # Calculate F1 score for this sample
                     test_score = accuracy_fn(ground_truth, prediction)
                     epoch_scores.append(test_score)
@@ -241,7 +241,11 @@ def training_block(model,
         return loss_list[-1], test_score_list[-1]
 
 
-def fine_tuning(model, nb_iterations, nb_epochs_per_iteration):
+def fine_tuning(model, 
+                nb_iterations, 
+                nb_epochs_per_iteration,
+                padding_size):
+
     block_names = ['DINOv2', 'MLP Head']
     index_list = []
     for _ in range(nb_iterations):
@@ -253,27 +257,27 @@ def fine_tuning(model, nb_iterations, nb_epochs_per_iteration):
     # Get datasets with proper train/validation split
     print("Loading training data...")
     train_set = get_data_generator(split='training', 
-                                  nb_best_patches=1,
+                                  nb_best_patches=10,
                                   resize_size=resize_size, 
-                                  padding_size=1, 
-                                  test_proportion=0.0,  # Use all training data
+                                  padding_size=padding_size, 
+                                  test_proportion=0,  # Use all training data
                                   seed=42)
 
     print("Loading test data...")
-    test_set = get_data_generator(split='validation',  # Use validation split for testing
-                                 nb_best_patches=1,
+    test_set = get_data_generator(split='test',  # Use validation split for testing
+                                 nb_best_patches=10,
                                  resize_size=resize_size, 
-                                 padding_size=1, 
-                                 test_proportion=0.0,   # Use all validation data
+                                 padding_size=padding_size, 
+                                 test_proportion=1,   # Use all validation data
                                  seed=42)
 
     iteration = 1
     for i, index in enumerate(tqdm(index_list, desc='Training Iterations')):
-        print(f"\n=== Training {block_names[index]} - Iteration {iteration} ===")
+        print(f"\n==================================== Training {block_names[index]} - Iteration {iteration} ====================================")
 
         # CRITICAL FIX: Use the actual index variable, not hardcoded 1
         loss, test_loss = training_block(model=model,
-                                       index=index,  # Fixed: use actual index!
+                                       index=index,
                                        nb_epochs=nb_epochs_per_iteration, 
                                        train_set=train_set, 
                                        test_set=test_set, 
@@ -312,7 +316,8 @@ if __name__ == '__main__':
     # OPTIMIZED: Reduced iterations and epochs for faster training
     general_loss_list, general_test_loss_list = fine_tuning(model=augmented_model,
                                                            nb_iterations=1,  # Reduced for testing
-                                                           nb_epochs_per_iteration=10)  # Reduced for faster training
+                                                           nb_epochs_per_iteration=2,
+                                                           padding_size=1)  # Reduced for faster training
 
     # Save final model
     save_model_checkpoint(augmented_model, general_loss_list, general_test_loss_list, "final")

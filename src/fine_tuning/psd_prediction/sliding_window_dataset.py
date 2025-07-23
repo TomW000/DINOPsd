@@ -26,9 +26,9 @@ _EMBEDDINGS = torch.load(os.path.join(embeddings_path, 'small_dataset_embs_518.p
 EMBEDDINGS=[]
 for e in _EMBEDDINGS:
     EMBEDDINGS.extend(e)
-EMBEDDINGS = EMBEDDINGS[:20]
+EMBEDDINGS = EMBEDDINGS
 
-REFS = torch.load(os.path.join(embeddings_path, 'small_mean_ref_518_Aug=False_k=10.pt'), weights_only=False)
+_REFS = torch.load(os.path.join(embeddings_path, 'small_mean_ref_518_Aug=False_k=10.pt'), weights_only=False)
 
 print('...done loading embeddings')
 
@@ -53,7 +53,7 @@ def get_data_generator(split: str = 'training',
 
     random.seed(seed)
 
-    DATASET = list(zip(files[:20], EMBEDDINGS))
+    DATASET = list(zip(files, EMBEDDINGS))[:2]
     random.shuffle(DATASET)
     SPLIT = int(len(DATASET) * test_proportion)
     TRAINING_SET = DATASET[SPLIT:]
@@ -69,7 +69,7 @@ def get_data_generator(split: str = 'training',
     # OPTIMIZATION: Pre-compute padding outside the loop
     padding = padding_size * patch_size
 
-    for file_idx, (file, embeddings) in enumerate(tqdm(list_iterator, total=len(list_iterator), desc=f'Loading {split} patches')):
+    for file, embeddings in tqdm(list_iterator, total=len(list_iterator), desc=f'-> Loop through {split} set'):
         
         # OPTIMIZATION: Create cache key
         cache_key = f"{file}_{resize_size}_{padding_size}_{nb_best_patches}"
@@ -123,23 +123,24 @@ def get_data_generator(split: str = 'training',
         
         # OPTIMIZATION: More efficient similarity computation
         flattened_embeddings = embeddings.reshape(-1, feat_dim)
-        
+        REFS = torch.from_numpy(_REFS)
+        REFS = REFS.to(device)
         # OPTIMIZATION: Use more efficient distance computation
         if nb_best_patches == 1:
             # For single best patch, we can optimize further
-            REFS = REFS.to(device)
             flattened_embeddings = flattened_embeddings.to(device)
             distances = torch.cdist(REFS, flattened_embeddings)
+            distances = distances.cpu().numpy()
             min_dist_idx = np.unravel_index(np.argmin(distances), distances.shape)
             patch_idx = min_dist_idx[1]
         else:
             # Original logic for multiple patches
-            REFS = REFS.to(device)
             flattened_embeddings = flattened_embeddings.to(device)
-            similarity_matrix = torch.cdist(REFS, flattened_embeddings)
-            flat_similarities = similarity_matrix.ravel()
+            distances = torch.cdist(REFS, flattened_embeddings)
+            distances = distances.cpu().numpy()
+            flat_similarities = distances.ravel()
             top_flat_indices = flat_similarities.argsort()[:nb_best_patches]
-            ref_indices, patch_indices = np.unravel_index(top_flat_indices, similarity_matrix.shape)
+            ref_indices, patch_indices = np.unravel_index(top_flat_indices, distances.shape)
             patch_idx = patch_indices[0] if nb_best_patches == 1 else patch_indices
         
         # OPTIMIZATION: Simplified ground truth generation for single patch
@@ -168,7 +169,7 @@ def get_data_generator(split: str = 'training',
                 
                 GT[gt_h_start_idx:gt_h_end_idx, gt_w_start_idx:gt_w_end_idx] = 1.0
 
-        result = (PATCHES, GT)
+        result = (file, PATCHES, GT)
         
         # OPTIMIZATION: Cache the result
         if use_cache:

@@ -1,5 +1,10 @@
-from src.setup import neurotransmitters
-from src.setup import plt, np
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+from src.setup import neurotransmitters, resize_size
+from src.perso_utils import load_image
+from src.analysis_utils import resize_hdf_image
 
 
 def training_curve(nb_epochs, loss_list, test_accuracies):
@@ -115,5 +120,33 @@ def confusion_matrix(data_type, prediction_list, nb_epochs, split):
     ax.text(nb_classes, nb_classes, f'({np.sum(total_matrix)})', va='center', ha='left', color='black')
 
     ax.set_title(f'Confusion Matrix - {split} - Epochs={nb_epochs}')
+    plt.tight_layout()
+    plt.show()
+
+
+def display_segmentation(mask, file_name):
+
+    mask = np.array(mask)
+    
+    h, w = mask.shape
+    fig, ax = plt.subplots(figsize=(5, 5), dpi=150)
+
+    initial_image = load_image(file_name)[0]
+    resized_image = resize_hdf_image(initial_image, resize_size=resize_size)
+
+    ax.imshow(resized_image, cmap='gray', extent=[0, h, w, 0])
+
+    # Overlay the heatmap
+    sns.heatmap(
+        mask,
+        cmap='bwr',
+        alpha=0.5,             # Make the heatmap semi-transparent
+        ax=ax,
+        cbar=False,
+        xticklabels=False,
+        yticklabels=False
+    )
+
+    plt.title("Segmentation")
     plt.tight_layout()
     plt.show()

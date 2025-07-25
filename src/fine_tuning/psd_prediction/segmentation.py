@@ -6,7 +6,7 @@ import seaborn as sns
 from tqdm import tqdm
 
 from .training import training_main
-from .head import Psd_Pred_MLP_Head
+from .mlp_head import Psd_Pred_MLP_Head
 
 from src.setup import embeddings_path, device, feat_dim, model_weights_path
 from src.perso_utils import get_fnames, load_image

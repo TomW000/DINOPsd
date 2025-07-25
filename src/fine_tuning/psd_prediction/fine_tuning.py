@@ -6,11 +6,29 @@ import os
 import matplotlib.pyplot as plt
 import umap
 from sklearn.metrics import f1_score
+import torchvision
+import torchvision.transforms as Trans
 
-from src.setup import model, device, model_weights_path, resize_size, feat_dim
+from src.setup import model, device, model_weights_path, resize_size, feat_dim, neurotransmitters
+from src.perso_utils import load_image
+from src.analysis_utils import resize_hdf_image
 from src.fine_tuning.adaptor.AdaptFormer import augmented_model
-from src.fine_tuning.display_results import display_segmentation
+from src.fine_tuning.psd_prediction.mlp_head import classification_head
+from src.fine_tuning.display_results import display_segmentation, confusion_matrix
 from .sliding_window_dataset import get_data_generator
+
+augmented_model_classification = nn.Sequential(augmented_model[0], classification_head)
+augmented_model_classification = augmented_model_classification.to(device)
+
+def accuracy_fn(y_true, y_pred): 
+        # Convert tensors to numpy for sklearn
+        y_true_np = y_true.cpu().detach().numpy().flatten()
+        y_pred_np = y_pred.cpu().detach().numpy().flatten()
+        # Binarize predictions
+        y_pred_binary = y_pred_np.astype(int)
+        y_true_binary = y_true_np.astype(int)
+        return f1_score(y_true_binary, y_pred_binary, zero_division=0)
+
 
 def training_block(model,
                    index, 
@@ -30,7 +48,7 @@ def training_block(model,
         for param in model[1].parameters():
             param.requires_grad = True 
 
-        optimizer = torch.optim.Adam(model[1].parameters(), lr=3e-4)
+        optimizer = torch.optim.Adam(model[1].parameters(), lr=1e-9)
         print("Training MLP Head")
         
     elif index == 0:
@@ -52,7 +70,7 @@ def training_block(model,
                 trainable_params.append(param)
         
         print(f"Training DINOv2 adapter layers - {len(trainable_params)} parameters")
-        optimizer = torch.optim.Adam(trainable_params, lr=3e-4)
+        optimizer = torch.optim.Adam(trainable_params, lr=1e-9)
         
     model.to(device)
 
@@ -62,21 +80,14 @@ def training_block(model,
 
     loss_list = []
     test_score_list = []
+    
+    class_prediction_list = []
 
     patch_size = model[0].patch_size
     
     # Use BCEWithLogitsLoss for binary classification
-    loss_fn = nn.BCEWithLogitsLoss()
-
-    def accuracy_fn(y_true, y_pred): 
-        # Convert tensors to numpy for sklearn
-        y_true_np = y_true.cpu().detach().numpy().flatten()
-        y_pred_np = y_pred.cpu().detach().numpy().flatten()
-        # Binarize predictions
-        y_pred_binary = (y_pred_np > 0.5).astype(int)
-        y_true_binary = (y_true_np > 0.5).astype(int)
-        return f1_score(y_true_binary, y_pred_binary, zero_division=0)
-
+    loss_fn = nn.L1Loss(reduction='sum')
+    
     for epoch in tqdm(range(nb_epochs), desc=f'--> Epochs (Index {index})'):
         model.train()
         epoch_loss_list = []
@@ -183,13 +194,32 @@ def training_block(model,
                         w_coord = (n % W_patch) * patch_size
                         prediction[h_coord:h_coord + patch_size, w_coord:w_coord + patch_size] = output_value
 
-                    display_segmentation(ground_truth.cpu().numpy(), file)
+                    prediction = prediction.cpu().numpy()
+                    display_segmentation(prediction, file)
+                    prediction_bool = prediction.astype(bool)
+                    inverted_prediction = ~prediction_bool
+                    biggest_mask = keep_largest_continuous_mask(inverted_prediction)
+                    ground_truth = ground_truth.cpu().numpy()
+
+                    display_segmentation(biggest_mask, file)
 
                     # Calculate F1 score for this sample
-                    test_score = accuracy_fn(ground_truth, prediction)
+                    test_score = f1_score(ground_truth, prediction, average='micro') 
                     epoch_scores.append(test_score)
                     test_samples_processed += 1
-                    
+                    '''
+                    crop = grow_mask(ground_truth, file)
+                    e = augmented_model_classification[0](crop)
+                    o = augmented_model_classification[1](e)
+                    osi = nn.Softmax()(o)
+                    pred = osi.argmax()
+                    path = os.path.normpath(file).split(os.sep)[-2]
+                    neuro_idx = neurotransmitters.index(path)
+                    print(f'{neuro_idx} - {pred}')
+                    class_prediction_list.append([pred, neuro_idx])
+                    '''
+                #confusion_matrix('neuro', class_prediction_list, nb_epochs, 'test')
+                
                 if epoch_scores:
                     test_score_list.append(np.mean(epoch_scores))
                 else:
@@ -202,7 +232,7 @@ def training_block(model,
                 test_score_list.append(0.0)
                 
         # Print epoch progress - less frequent printing
-        if epoch % max(1, nb_epochs // 5) == 0 or epoch == nb_epochs - 1:
+        if 1==1:#epoch % max(1, nb_epochs // 1) == 0 or epoch == nb_epochs - 1:
             print(f"Epoch {epoch+1}/{nb_epochs} - Loss: {loss_list[-1]:.4f}, F1: {test_score_list[-1]:.4f}")
 
     # UMAP visualization - only if requested and data available
@@ -240,16 +270,49 @@ def training_block(model,
     else:
         return loss_list[-1], test_score_list[-1]
 
+def grow_mask(mask, file):
+    image, _, _ = load_image(file)
+    resized_image = resize_hdf_image(image, resize_size=resize_size).squeeze()
+    mask = mask.cpu().numpy() if isinstance(mask, torch.Tensor) else mask
+    mask_boundaries = np.where(mask != 0)
+    if mask_boundaries[0].size == 0 or mask_boundaries[1].size == 0:
+        print('No prediction found - returning original file')
+        return resized_image
+    else:
+        min_h, max_h = np.min(mask_boundaries[0]), np.max(mask_boundaries[0])
+        min_w, max_w = np.min(mask_boundaries[1]), np.max(mask_boundaries[1])
+        crop = resized_image[min_h-518:max_h+518, min_w-518:max_w+518][np.newaxis, np.newaxis, ...]
+        crop = torch.from_numpy(crop)
+        resized_crop = Trans.Resize(size=(resize_size, resize_size), interpolation=torchvision.transforms.InterpolationMode.BICUBIC, antialias=True)(crop)
+        stack = np.concatenate([resized_crop, resized_crop, resized_crop], axis=1)
+        return torch.from_numpy(stack).to(torch.float32).to(device)
+
+
+from skimage import measure, morphology
+def keep_largest_continuous_mask(mask):
+    labelled = measure.label(mask)
+    rp = measure.regionprops(labelled)
+
+    # get size of largest cluster
+    size = max([i.area for i in rp])
+
+    # remove everything smaller than largest
+    out = morphology.remove_small_objects(mask, min_size=size-1)
+    
+    out = out.astype(np.uint8)
+    return out
+
 
 def fine_tuning(model, 
                 nb_iterations, 
                 nb_epochs_per_iteration,
+                nb_best_patches,
                 padding_size):
 
     block_names = ['DINOv2', 'MLP Head']
     index_list = []
     for _ in range(nb_iterations):
-        index_list.extend([1, 1])  # Train MLP head first, then DINOv2
+        index_list.extend([1, 0])  # Train MLP head first, then DINOv2
         
     general_loss_list = [[], []]  # [DINOv2, MLP Head]
     general_test_loss_list = [[], []]
@@ -257,23 +320,23 @@ def fine_tuning(model,
     # Get datasets with proper train/validation split
     print("Loading training data...")
     train_set = get_data_generator(split='training', 
-                                  nb_best_patches=10,
+                                  nb_best_patches=nb_best_patches,
                                   resize_size=resize_size, 
                                   padding_size=padding_size, 
-                                  test_proportion=0,  # Use all training data
+                                  test_proportion=0.2,  # Use all training data
                                   seed=42)
 
     print("Loading test data...")
     test_set = get_data_generator(split='test',  # Use validation split for testing
-                                 nb_best_patches=10,
+                                 nb_best_patches=nb_best_patches,
                                  resize_size=resize_size, 
                                  padding_size=padding_size, 
-                                 test_proportion=1,   # Use all validation data
+                                 test_proportion=0.8,   # Use all validation data
                                  seed=42)
 
     iteration = 1
     for i, index in enumerate(tqdm(index_list, desc='Training Iterations')):
-        print(f"\n==================================== Training {block_names[index]} - Iteration {iteration} ====================================")
+        print(f"\n======================================================================== Training {block_names[index]} - Iteration {iteration} ========================================================================")
 
         # CRITICAL FIX: Use the actual index variable, not hardcoded 1
         loss, test_loss = training_block(model=model,
@@ -316,8 +379,9 @@ if __name__ == '__main__':
     # OPTIMIZED: Reduced iterations and epochs for faster training
     general_loss_list, general_test_loss_list = fine_tuning(model=augmented_model,
                                                            nb_iterations=1,  # Reduced for testing
-                                                           nb_epochs_per_iteration=2,
-                                                           padding_size=1)  # Reduced for faster training
+                                                           nb_epochs_per_iteration=1,
+                                                           nb_best_patches=50,
+                                                           padding_size=2)  # Reduced for faster training
 
     # Save final model
     save_model_checkpoint(augmented_model, general_loss_list, general_test_loss_list, "final")

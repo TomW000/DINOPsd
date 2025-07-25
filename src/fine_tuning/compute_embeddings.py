@@ -18,7 +18,7 @@ files, labels = zip(*get_fnames())
 resize_factor = resize_size/130
 resize = lambda x: resize_factor*x
 
-from perso_utils import filter_f
+from src.perso_utils import filter_f
 filter = filter_f
 
 indices = [

@@ -75,7 +75,7 @@ def add_context_to_embeddings(path, delta): # delta should be an even number
 
 def resize_hdf_image(image, resize_size):
     image = torch.from_numpy(image)
-    resized_image = Trans.Resize(size=resize_size, interpolation=torchvision.transforms.InterpolationMode.BICUBIC, antialias=True)(image).permute(1,2,0).numpy()
+    resized_image = Trans.Resize(size=(resize_size, resize_size), interpolation=torchvision.transforms.InterpolationMode.BICUBIC, antialias=True)(image).permute(1,2,0).numpy()
     return resized_image
 
 def resize_tiff_image(img):

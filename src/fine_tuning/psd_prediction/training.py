@@ -7,7 +7,7 @@ import umap
 import matplotlib.pyplot as plt
 from timeit import default_timer as timer
 
-from .head import Psd_Pred_MLP_Head
+from .mlp_head import Psd_Pred_MLP_Head
 from .dataset import dataset_generator, Custom_Dataset, LABELLED_REST, nb_best_patches 
 from src.fine_tuning.display_results import training_curve, confusion_matrix
 

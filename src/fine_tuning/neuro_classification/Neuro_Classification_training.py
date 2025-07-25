@@ -1,11 +1,11 @@
 import torch 
 from torch import nn
-from tqdm.notebook import tqdm
+from tqdm import tqdm
 import numpy as np
 
 from .Neuro_Classification_Head import head
 from .Neuro_Classification_dataset import training_loader, test_loader
-from setup import device
+from src.setup import device
 
 optimizer = torch.optim.Adam(head.parameters(), lr=3e-4)
 loss_fn = nn.BCELoss()

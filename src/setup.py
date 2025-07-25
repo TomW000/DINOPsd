@@ -82,7 +82,7 @@ few_shot_transforms = [Trans.ToTensor(),
 resize_size = 518 #@param {type:"integer"} #TODO: Try other values
 
 device = torch.device('cuda' if torch.cuda.is_available() 
-                      #else 'mps' if torch.mps.is_available()
+                      else 'mps' if torch.mps.is_available()
                       else 'cpu')
 print("Device:", device)
 

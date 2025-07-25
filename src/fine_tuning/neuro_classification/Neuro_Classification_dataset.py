@@ -1,15 +1,15 @@
 import torch
 import numpy as np
 import os
-from random import sample
+import random 
 from torch.utils.data import Dataset
 import torch.utils.data as utils
 
-from DinoPsd import DinoPsd_pipeline
-from DinoPsd_utils import get_img_processing_f
-from Fine_Tuning.compute_embeddings import compute_embeddings
+from src.DinoPsd import DinoPsd_pipeline
+from src.DinoPsd_utils import get_img_processing_f
+from src.fine_tuning.compute_embeddings import compute_embeddings
 
-from setup import resize_size, embeddings_path, neurotransmitters
+from src.setup import resize_size, embeddings_path, neurotransmitters
 
 
 device = torch.device('cuda' if torch.cuda.is_available() 
@@ -60,7 +60,7 @@ else:
     
     DATASET = list(zip(DATA, LABELS))
 
-DATASET = sample(DATASET, len(DATASET))
+random.shuffle(DATASET)
 
 
 test_proportion = 0.2

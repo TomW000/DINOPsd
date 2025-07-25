@@ -2,9 +2,7 @@ import torch
 from torch import nn
 import numpy as np
 
-from src.fine_tuning.psd_prediction.head import detection_head # TODO: CHANGE DEPENDING ON CLASSIFICATION TASK
-
-head = detection_head
+from src.fine_tuning.psd_prediction.mlp_head import detection_head # TODO: CHANGE DEPENDING ON CLASSIFICATION TASK
 
 device = torch.device('cuda' if torch.cuda.is_available() 
                       #else 'mps' if torch.mps.is_available()
@@ -26,12 +24,12 @@ feat_dim = model_dims[model_size]
 for param in model.parameters():
     param.requires_grad = False
     
-for praram in head.parameters():
+for praram in detection_head.parameters():
     param.requires_grad = False
 
 
 class AdaptMLP(nn.Module):
-    def __init__(self, device, original_mlp, in_dim, mid_dim, dropout=0.0, s=0.0): # TODO: CHANGE DEPENDING ON TASK
+    def __init__(self, device, original_mlp, in_dim, mid_dim, dropout=0.0, s=0.1): # TODO: CHANGE DEPENDING ON TASK
         super().__init__()
         
         self.device = device
@@ -79,7 +77,7 @@ for k in range(len(list(model.blocks))): # type: ignore
     model.blocks[k].mlp = adapter# type: ignore
 
 
-augmented_model = nn.Sequential(model, head)# type: ignore
+augmented_model = nn.Sequential(model, detection_head)# type: ignore
 augmented_model.eval()
 augmented_model.to(device)
 

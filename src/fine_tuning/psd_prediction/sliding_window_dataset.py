@@ -53,7 +53,7 @@ def get_data_generator(split: str = 'training',
 
     random.seed(seed)
 
-    DATASET = list(zip(files, EMBEDDINGS))[:2]
+    DATASET = list(zip(files, EMBEDDINGS))[:10]
     random.shuffle(DATASET)
     SPLIT = int(len(DATASET) * test_proportion)
     TRAINING_SET = DATASET[SPLIT:]

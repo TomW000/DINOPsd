@@ -124,7 +124,7 @@ def confusion_matrix(data_type, prediction_list, nb_epochs, split):
     plt.show()
 
 
-def display_segmentation(mask, file_name):
+def display_segmentation(mask, file_name, score):
 
     mask = np.array(mask)
     
@@ -147,6 +147,6 @@ def display_segmentation(mask, file_name):
         yticklabels=False
     )
 
-    plt.title("Segmentation")
+    plt.title("Segmentation - Score={:.2f}".format(score))
     plt.tight_layout()
     plt.show()

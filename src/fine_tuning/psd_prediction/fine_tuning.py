@@ -5,7 +5,7 @@ from tqdm import tqdm
 import os 
 import matplotlib.pyplot as plt
 import umap
-from sklearn.metrics import f1_score
+from sklearn.metrics import f1_score, jaccard_score
 import torchvision
 import torchvision.transforms as Trans
 from pytorch_metric_learning.losses import NTXentLoss
@@ -48,10 +48,10 @@ class FineTuner:
         self.model = augmented_model.to(device)
         
         # Loss functions
-        self.regression_loss_fn = nn.L1Loss(reduction='sum')
+        self.regression_loss_fn = nn.L1Loss(reduction='mean')
         self.contrastive_loss_fn = NTXentLoss()
         
-    def setup_optimizer(self, training_index, learning_rate=1e-9):
+    def setup_optimizer(self, training_index, learning_rate=3e-4):
         """Setup optimizer based on which component to train"""
         if training_index == 1:  # Train MLP head
             return self._setup_mlp_optimizer(learning_rate)
@@ -195,16 +195,15 @@ class FineTuner:
                 inverted_prediction = ~prediction_bool
                 biggest_mask = self._keep_largest_continuous_mask(inverted_prediction)
                 
-                plt.savefig(prediction, os.getcwd())
-                
-                # Display results
-                #display_segmentation(prediction, file)
-                #display_segmentation(biggest_mask, file)
-                
                 # Calculate F1 score
                 ground_truth_np = ground_truth.cpu().numpy()
-                score = f1_score(ground_truth_np.flatten(), prediction.flatten(), average='micro')
+                #score = f1_score(ground_truth_np.flatten(), prediction.flatten(), average='micro')
+                score = jaccard_score(ground_truth_np.flatten(), prediction.flatten())
                 scores.append(score)
+                
+                # Display results
+                #display_segmentation(prediction, file, score)
+                #display_segmentation(ground_truth.cpu().numpy(), file, score)
                 
                 samples_processed += 1
         
@@ -281,14 +280,14 @@ class FineTuner:
                            c=color, s=1, label=name, alpha=0.6)
         
         plt.legend()
-        plt.title(f'UMAP Visualization - Test F1: {test_score:.4f}')
+        plt.title(f'UMAP Visualization - Test IoU: {test_score:.4f}')
         plt.xlabel('UMAP 1')
         plt.ylabel('UMAP 2')
         plt.tight_layout()
         plt.show()
     
     def train_component(self, training_index, epochs, train_set, test_set, 
-                       batch_size=32, eval_frequency=None):
+                       batch_size=32, eval_frequency=10):
         """Train a specific component (adapter or MLP head)"""
         component_names = ['DINOv2 Adapter', 'MLP Head']
         print(f"Training {component_names[training_index]}...")
@@ -311,7 +310,7 @@ class FineTuner:
                 test_score = self.evaluate(test_set, max_samples=max_samples)
                 test_scores.append(test_score)
                 
-                print(f"Epoch {epoch+1}/{epochs} - Loss: {train_loss:.4f}, F1: {test_score:.4f}")
+                print(f"Epoch {epoch+1}/{epochs} - Loss: {train_loss:.4f}, IoU: {test_score:.4f}")
             else:
                 # Reuse last test score for non-evaluation epochs
                 test_scores.append(test_scores[-1] if test_scores else 0.0)
@@ -359,17 +358,17 @@ def plot_training_results(loss_lists, test_lists):
     # Test F1 score plot
     if test_lists[0]:
         x_dino = list(range(1, len(test_lists[0]) + 1))
-        ax2.plot(x_dino, test_lists[0], label='DINOv2 Test F1', 
+        ax2.plot(x_dino, test_lists[0], label='DINOv2 Test IoU', 
                 color='red', marker='o', linewidth=2)
     
     if test_lists[1]:
         x_mlp = list(range(1, len(test_lists[1]) + 1))
-        ax2.plot(x_mlp, test_lists[1], label='MLP Test F1', 
+        ax2.plot(x_mlp, test_lists[1], label='MLP Test IoU', 
                 color='orange', marker='s', linewidth=2)
     
-    ax2.set_ylabel('Test F1 Score')
+    ax2.set_ylabel('Test IoU Score')
     ax2.set_xlabel('Iterations')
-    ax2.set_title('Test F1 Score Over Iterations')
+    ax2.set_title('Test IoU Score Over Iterations')
     ax2.legend()
     ax2.grid(True, alpha=0.3)
     
@@ -389,12 +388,12 @@ def print_final_results(loss_lists, test_lists):
         if loss_lists[i] and test_lists[i]:
             final_loss = loss_lists[i][-1]
             final_f1 = test_lists[i][-1]
-            print(f"{name} - Train Loss: {final_loss:.4f}, Test F1: {final_f1:.4f}")
+            print(f"{name} - Train Loss: {final_loss:.4f}, Test IoU: {final_f1:.4f}")
             
             # Calculate improvement
             if len(test_lists[i]) > 1:
                 improvement = test_lists[i][-1] - test_lists[i][0]
-                print(f"{name} F1 Improvement: {improvement:+.4f}")
+                print(f"{name} IoU Improvement: {improvement:+.4f}")
 
 
 def run_fine_tuning(nb_iterations=2, nb_epochs_per_iteration=10, 
@@ -415,7 +414,6 @@ def run_fine_tuning(nb_iterations=2, nb_epochs_per_iteration=10,
         test_proportion=0.2,
         seed=42)
     )
-    
     test_set = list(get_data_generator(
         split='test',
         nb_best_patches=nb_best_patches,
@@ -424,7 +422,6 @@ def run_fine_tuning(nb_iterations=2, nb_epochs_per_iteration=10,
         test_proportion=0.2,
         seed=42)
     )
-    
     # Training schedule: alternating MLP Head (1) and DINOv2 Adapter (0)
     training_schedule = []
     for _ in range(nb_iterations):
@@ -458,20 +455,20 @@ def run_fine_tuning(nb_iterations=2, nb_epochs_per_iteration=10,
         test_lists[training_index].append(final_score)
         
         component_name = 'MLP Head' if training_index == 1 else 'DINOv2 Adapter'
-        print(f'{component_name} | Iteration: {iteration} | Loss: {final_loss:.4f} | F1: {final_score:.4f}')
+        print(f'{component_name} | Iteration: {iteration} | Loss: {final_loss:.4f} | IoU: {final_score:.4f}')
         
         # Save checkpoint
         if i % 2 == 1:  # After both components trained
-            save_checkpoint(fine_tuner.model, loss_lists, test_lists, iteration)
+            #save_checkpoint(fine_tuner.model, loss_lists, test_lists, iteration)
             iteration += 1
     
     # Final evaluation with UMAP
     print("\nRunning final evaluation with UMAP...")
     final_score = fine_tuner.evaluate(test_set, use_umap=True)
-    print(f"Final Test F1 Score: {final_score:.4f}")
+    print(f"Final Test IoU Score: {final_score:.4f}")
     
     # Save final model
-    save_checkpoint(fine_tuner.model, loss_lists, test_lists, "final")
+    #save_checkpoint(fine_tuner.model, loss_lists, test_lists, "final")
     
     # Plot and print results
     plot_training_results(loss_lists, test_lists)
@@ -487,7 +484,7 @@ if __name__ == '__main__':
     loss_lists, test_lists, trained_model = run_fine_tuning(
         nb_iterations=1,  # Reduced for testing
         nb_epochs_per_iteration=5,  # Reduced for faster training
-        nb_best_patches=50,
+        nb_best_patches=10,
         padding_size=2
     )
     

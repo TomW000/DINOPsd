@@ -53,8 +53,11 @@ def get_data_generator(split: str = 'training',
 
     random.seed(seed)
 
-    DATASET = list(zip(files, EMBEDDINGS))[:10]
+    DATASET = list(zip(files, EMBEDDINGS))
     random.shuffle(DATASET)
+    
+    DATASET = random.sample(DATASET, 10) # TODO: Limit dataset for faster iteration
+    
     SPLIT = int(len(DATASET) * test_proportion)
     TRAINING_SET = DATASET[SPLIT:]
     TEST_SET = DATASET[:SPLIT]
@@ -69,7 +72,7 @@ def get_data_generator(split: str = 'training',
     # OPTIMIZATION: Pre-compute padding outside the loop
     padding = padding_size * patch_size
 
-    for file, embeddings in tqdm(list_iterator, total=len(list_iterator), desc=f'-> Loop through {split} set'):
+    for file, embeddings in tqdm(list_iterator, total=len(list_iterator), desc=f'-> Loading {split} set'):
         
         # OPTIMIZATION: Create cache key
         cache_key = f"{file}_{resize_size}_{padding_size}_{nb_best_patches}"

@@ -42,10 +42,11 @@ from math import ceil, floor
 from itertools import chain
 from random import sample
 
+import platform
 
-OS = "mac"
+OS = platform.system()
 
-if OS == "linux":
+if OS == "Linux":
     dataset_path = '/home/tomwelch/Cambridge/Datasets/neurotransmitter_data'
     embeddings_path = '/home/tomwelch/Cambridge/Embeddings'
     model_weights_path = '/home/tomwelch/Cambridge/model_weights'

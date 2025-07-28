@@ -159,6 +159,7 @@ class FineTuner:
                 
                 # Forward pass
                 predictions = self.model[1](batch_embeddings).squeeze()
+                predictions = nn.Sigmoid()(predictions)
                 
                 # Handle single prediction case
                 if predictions.dim() == 0:
@@ -232,6 +233,7 @@ class FineTuner:
             
             # Predict
             output = self.model[1](central_embedding)
+            output = nn.Sigmoid()(output)
             output_value = (output > 0.5).float()
             
             # Collect UMAP data
@@ -483,7 +485,7 @@ if __name__ == '__main__':
     # Run fine-tuning with optimized parameters
     loss_lists, test_lists, trained_model = run_fine_tuning(
         nb_iterations=1,  # Reduced for testing
-        nb_epochs_per_iteration=5,  # Reduced for faster training
+        nb_epochs_per_iteration=10,  # Reduced for faster training
         nb_best_patches=10,
         padding_size=2
     )

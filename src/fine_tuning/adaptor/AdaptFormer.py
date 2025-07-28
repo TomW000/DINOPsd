@@ -2,8 +2,6 @@ import torch
 from torch import nn
 import numpy as np
 
-from src.fine_tuning.psd_prediction.mlp_head import detection_head # TODO: CHANGE DEPENDING ON CLASSIFICATION TASK
-
 device = torch.device('cuda' if torch.cuda.is_available() 
                       #else 'mps' if torch.mps.is_available()
                       else 'cpu')
@@ -24,9 +22,6 @@ feat_dim = model_dims[model_size]
 for param in model.parameters():
     param.requires_grad = False
     
-for praram in detection_head.parameters():
-    param.requires_grad = False
-
 
 class AdaptMLP(nn.Module):
     def __init__(self, device, original_mlp, in_dim, mid_dim, dropout=0.0, s=0.1): # TODO: CHANGE DEPENDING ON TASK
@@ -75,19 +70,3 @@ for k in range(len(list(model.blocks))): # type: ignore
     adapter = AdaptMLP(device, mlp, in_dim, mid_dim)
 
     model.blocks[k].mlp = adapter# type: ignore
-
-
-augmented_model = nn.Sequential(model, detection_head)# type: ignore
-augmented_model.eval()
-augmented_model.to(device)
-
-
-trainable_params = [p for p in augmented_model.parameters() if p.requires_grad]
-params = sum([np.prod(p.size()) for p in trainable_params])
-
-frozen_params_list = [p for p in augmented_model.parameters() if not p.requires_grad]
-frozen_params = sum([np.prod(p.size()) for p in frozen_params_list])
-
-total_params = params + frozen_params
-
-print(f'Proportion of trainable parameters when head frozen: {params / total_params * 100:.2f}%')

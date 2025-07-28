@@ -8,359 +8,322 @@ import umap
 from sklearn.metrics import f1_score
 import torchvision
 import torchvision.transforms as Trans
+from pytorch_metric_learning.losses import NTXentLoss
+from skimage import measure, morphology
 
 from src.setup import model, device, model_weights_path, resize_size, feat_dim, neurotransmitters
 from src.perso_utils import load_image
 from src.analysis_utils import resize_hdf_image
-from src.fine_tuning.adaptor.AdaptFormer import augmented_model
-from src.fine_tuning.psd_prediction.mlp_head import classification_head
+from src.fine_tuning.adaptor.AdaptFormer import model
+from src.fine_tuning.psd_prediction.mlp_head import detection_head, classification_head
 from src.fine_tuning.display_results import display_segmentation, confusion_matrix
 from .sliding_window_dataset import get_data_generator
 
-augmented_model_classification = nn.Sequential(augmented_model[0], classification_head)
-augmented_model_classification = augmented_model_classification.to(device)
 
-def accuracy_fn(y_true, y_pred): 
-        # Convert tensors to numpy for sklearn
-        y_true_np = y_true.cpu().detach().numpy().flatten()
-        y_pred_np = y_pred.cpu().detach().numpy().flatten()
-        # Binarize predictions
-        y_pred_binary = y_pred_np.astype(int)
-        y_true_binary = y_true_np.astype(int)
-        return f1_score(y_true_binary, y_pred_binary, zero_division=0)
+augmented_model = nn.Sequential(model, detection_head) # type: ignore
+augmented_model.eval()
+augmented_model.to(device)
 
 
-def training_block(model,
-                   index, 
-                   nb_epochs, 
-                   train_set, 
-                   test_set, 
-                   return_statistics=False, 
-                   use_umap=False,
-                   batch_size=32):  # Added batch processing parameter
+trainable_params = [p for p in augmented_model.parameters() if p.requires_grad]
+params = sum([np.prod(p.size()) for p in trainable_params])
+frozen_params_list = [p for p in augmented_model.parameters() if not p.requires_grad]
+frozen_params = sum([np.prod(p.size()) for p in frozen_params_list])
+total_params = params + frozen_params
+print(f'Proportion of trainable parameters when head frozen: {params / total_params * 100:.2f}%')
 
-    # Set up trainable parameters and optimizer
-    if index == 1:
-        # Train MLP head
-        for param in model.parameters():
+
+
+class FineTuner:
+    """Fine-tuning class for DINOv2 with adapter layers and MLP head"""
+    
+    def __init__(self, augmented_model, device, feat_dim, resize_size, patch_size=None):
+        self.device = device
+        self.feat_dim = feat_dim
+        self.resize_size = resize_size
+        self.patch_size = patch_size or augmented_model[0].patch_size
+        
+        # Create classification model
+        self.classification_head = classification_head
+        self.model = augmented_model.to(device)
+        
+        # Loss functions
+        self.regression_loss_fn = nn.L1Loss(reduction='sum')
+        self.contrastive_loss_fn = NTXentLoss()
+        
+    def setup_optimizer(self, training_index, learning_rate=1e-9):
+        """Setup optimizer based on which component to train"""
+        if training_index == 1:  # Train MLP head
+            return self._setup_mlp_optimizer(learning_rate)
+        elif training_index == 0:  # Train DINOv2 adapter layers
+            return self._setup_adapter_optimizer(learning_rate)
+        else:
+            raise ValueError("training_index must be 0 (adapter) or 1 (MLP)")
+    
+    def _setup_mlp_optimizer(self, learning_rate):
+        """Setup optimizer for MLP head training"""
+        # Freeze all parameters
+        for param in self.model.parameters():
             param.requires_grad = False
         
-        for param in model[1].parameters():
-            param.requires_grad = True 
-
-        optimizer = torch.optim.Adam(model[1].parameters(), lr=1e-9)
-        print("Training MLP Head")
+        # Unfreeze MLP head
+        for param in self.model[1].parameters():
+            param.requires_grad = True
         
-    elif index == 0:
-        # Train DINOv2 adapter layers
+        print("Training MLP Head")
+        return torch.optim.Adam(self.model[1].parameters(), lr=learning_rate)
+    
+    def _setup_adapter_optimizer(self, learning_rate):
+        """Setup optimizer for adapter layer training"""
         trainable_params = []
         
-        for param in model.parameters():
-            param.requires_grad = False 
+        # Freeze all parameters
+        for param in self.model.parameters():
+            param.requires_grad = False
         
-        for k in range(len(list(model[0].blocks))):
-            block = model[0].blocks[k].mlp
-        
-            for param in block.down_proj.parameters(): 
-                param.requires_grad = True 
+        # Unfreeze adapter layers
+        for block in self.model[0].blocks:
+            mlp = block.mlp
+            
+            for param in mlp.down_proj.parameters():
+                param.requires_grad = True
                 trainable_params.append(param)
             
-            for param in block.up_proj.parameters():
-                param.requires_grad = True 
+            for param in mlp.up_proj.parameters():
+                param.requires_grad = True
                 trainable_params.append(param)
         
         print(f"Training DINOv2 adapter layers - {len(trainable_params)} parameters")
-        optimizer = torch.optim.Adam(trainable_params, lr=1e-9)
+        return torch.optim.Adam(trainable_params, lr=learning_rate)
+    
+    def extract_patch_features(self, patches, ground_truth):
+        """Extract features and targets from patches"""
+        H_size, W_size = ground_truth.shape
+        H_patch, W_patch = H_size // self.patch_size, W_size // self.patch_size
         
-    model.to(device)
-
-    # UMAP setup
-    if use_umap:
-        reducer = umap.UMAP(random_state=42)
-
-    loss_list = []
-    test_score_list = []
+        all_embeddings = []
+        all_targets = []
+        
+        for n, patch in enumerate(patches):
+            patch = patch.to(self.device).float()
+            nb_patches_h, nb_patches_w = patch.shape[-2] // self.patch_size, patch.shape[-1] // self.patch_size
+            
+            # Extract embeddings
+            embeddings = self.model[0].forward_features(patch)["x_norm_patchtokens"]
+            embeddings = embeddings.reshape(nb_patches_h, nb_patches_w, self.feat_dim)
+            central_embedding = embeddings[nb_patches_h//2, nb_patches_w//2]
+            all_embeddings.append(central_embedding)
+            
+            # Calculate target
+            h_coord = n // W_patch
+            w_coord = n % W_patch
+            gt_patch = ground_truth[h_coord:h_coord + self.patch_size, 
+                                  w_coord:w_coord + self.patch_size]
+            target = gt_patch.mean()
+            all_targets.append(target)
+        
+        all_embeddings_tensor = torch.stack(all_embeddings)
+        all_targets_tensor = torch.stack(all_targets)
+        
+        all_embeddings_tensor.requires_grad = True
+        all_targets_tensor.requires_grad = True
+        
+        return all_embeddings_tensor, all_targets_tensor
     
-    class_prediction_list = []
-
-    patch_size = model[0].patch_size
-    
-    # Use BCEWithLogitsLoss for binary classification
-    loss_fn = nn.L1Loss(reduction='sum')
-    
-    for epoch in tqdm(range(nb_epochs), desc=f'--> Epochs (Index {index})'):
-        model.train()
-        epoch_loss_list = []
-
+    def train_epoch(self, train_set, optimizer, training_index, batch_size=32):
+        """Train for one epoch"""
+        self.model.train()
+        epoch_losses = []
+        
         for file, patches, ground_truth in train_set:
-            ground_truth = ground_truth.to(device).float()
-            H_size, W_size = ground_truth.shape
-            H_patch, W_patch = H_size // patch_size, W_size // patch_size
+            ground_truth = ground_truth.to(self.device).float()
             
-            # OPTIMIZED: Collect all embeddings and targets first
-            all_embeddings = []
-            all_targets = []
+            # Extract features
+            embeddings, targets = self.extract_patch_features(patches, ground_truth)
             
-            # Extract embeddings for all patches (more efficient batching)
-            for n, patch in enumerate(patches):
-                patch = patch.to(device).float()
-                nb_patches_h, nb_patches_w = patch.shape[-2] // patch_size, patch.shape[-1] // patch_size
-                
-                # Get embeddings - use no_grad for feature extraction to save memory
-                with torch.no_grad() if index == 1 else torch.enable_grad():
-                    embeddings = model[0].forward_features(patch)["x_norm_patchtokens"].reshape(nb_patches_h, nb_patches_w, feat_dim)
-                    central_embedding = embeddings[nb_patches_h//2, nb_patches_w//2]
-                    all_embeddings.append(central_embedding)
-                
-                # Calculate coordinates and target
-                h_coord = n // W_patch
-                w_coord = n % W_patch
-                gt_patch = ground_truth[h_coord:h_coord + patch_size, w_coord:w_coord + patch_size]
-                target = gt_patch.mean()
-                all_targets.append(target)
+            if len(embeddings) == 0:
+                continue
             
-            # OPTIMIZED: Batch processing
-            if all_embeddings:
-                embeddings_tensor = torch.stack(all_embeddings)
-                targets_tensor = torch.stack(all_targets)
+            # Contrastive loss
+            optimizer.zero_grad()
+            contrastive_loss = self.contrastive_loss_fn(embeddings, targets)
+            contrastive_loss.backward()
+            optimizer.step()
+            
+            # Batch processing for regression
+            num_patches = len(embeddings)
+            for i in range(0, num_patches, batch_size):
+                end_idx = min(i + batch_size, num_patches)
+                batch_embeddings = embeddings[i:end_idx]
+                batch_targets = targets[i:end_idx]
                 
-                # Process in smaller batches to manage memory
-                num_patches = len(embeddings_tensor)
-                for i in range(0, num_patches, batch_size):
-                    end_idx = min(i + batch_size, num_patches)
-                    batch_embeddings = embeddings_tensor[i:end_idx]
-                    batch_targets = targets_tensor[i:end_idx]
-                    
-                    optimizer.zero_grad()
-                    
-                    # Forward pass through MLP
-                    predictions = model[1](batch_embeddings).squeeze()
-                    
-                    # Handle single prediction case
-                    if predictions.dim() == 0:
-                        predictions = predictions.unsqueeze(0)
-                    if batch_targets.dim() == 0:
-                        batch_targets = batch_targets.unsqueeze(0)
-                    
-                    # Calculate loss
-                    loss = loss_fn(predictions.cpu(), batch_targets.cpu())
-                    loss.backward()
-                    optimizer.step()
-                    
-                    epoch_loss_list.append(loss.item())
-        if epoch_loss_list:  # Only append if we have losses
-            loss_list.append(np.mean(epoch_loss_list))
-        else:
-            loss_list.append(0.0)
-
-        # Evaluation phase - OPTIMIZED: Less frequent evaluation for speed
-        if epoch % max(1, nb_epochs // 10) == 0 or epoch == nb_epochs - 1:
-            model.eval()
-            with torch.no_grad():
-                # UMAP setup for first epoch only
-                if use_umap and epoch == 0:
-                    UMAP_LIST, UMAP_PREDICTED_LABELS = [], []
-
-                epoch_scores = []
+                # Forward pass
+                predictions = self.model[1](batch_embeddings).squeeze()
                 
-                # OPTIMIZED: Limit number of test samples during training for speed
-                test_samples_processed = 0
-                max_test_samples = 50 if epoch < nb_epochs - 1 else float('inf')  # Full evaluation only on last epoch
-                for file, patches, ground_truth in test_set:
-                    if test_samples_processed >= max_test_samples:
-                        break
-                    
-                    ground_truth = ground_truth.to(device).float()
-                    H_size, W_size = ground_truth.shape
-                    H_patch, W_patch = H_size // patch_size, W_size // patch_size
-                    prediction = torch.zeros(ground_truth.shape, device=device)
-                    
-                    for n, patch in enumerate(patches):
-                        patch = patch.to(device).float()
-                        nb_patches_h, nb_patches_w = patch.shape[-2] // patch_size, patch.shape[-1] // patch_size
-                        embeddings = model[0].forward_features(patch)["x_norm_patchtokens"].reshape(nb_patches_h, nb_patches_w, feat_dim)
-                        central_embedding = embeddings[nb_patches_h//2, nb_patches_w//2]
-                        central_embedding = central_embedding.unsqueeze(0)
-                        
-                        output = model[1](central_embedding)
-                        output_sigmoid = torch.sigmoid(output.squeeze())
-                        output_value = (output > 0.5).float()
-                        # UMAP data collection
-                        if use_umap and epoch == 0:    
-                            UMAP_LIST.append(central_embedding.cpu().numpy().flatten())
-                            UMAP_PREDICTED_LABELS.append(output_value.cpu().numpy())
-                        
-                        h_coord = (n // W_patch) * patch_size
-                        w_coord = (n % W_patch) * patch_size
-                        prediction[h_coord:h_coord + patch_size, w_coord:w_coord + patch_size] = output_value
-
-                    prediction = prediction.cpu().numpy()
-                    display_segmentation(prediction, file)
-                    prediction_bool = prediction.astype(bool)
-                    inverted_prediction = ~prediction_bool
-                    biggest_mask = keep_largest_continuous_mask(inverted_prediction)
-                    ground_truth = ground_truth.cpu().numpy()
-
-                    display_segmentation(biggest_mask, file)
-
-                    # Calculate F1 score for this sample
-                    test_score = f1_score(ground_truth, prediction, average='micro') 
-                    epoch_scores.append(test_score)
-                    test_samples_processed += 1
-                    '''
-                    crop = grow_mask(ground_truth, file)
-                    e = augmented_model_classification[0](crop)
-                    o = augmented_model_classification[1](e)
-                    osi = nn.Softmax()(o)
-                    pred = osi.argmax()
-                    path = os.path.normpath(file).split(os.sep)[-2]
-                    neuro_idx = neurotransmitters.index(path)
-                    print(f'{neuro_idx} - {pred}')
-                    class_prediction_list.append([pred, neuro_idx])
-                    '''
-                #confusion_matrix('neuro', class_prediction_list, nb_epochs, 'test')
+                # Handle single prediction case
+                if predictions.dim() == 0:
+                    predictions = predictions.unsqueeze(0)
+                if batch_targets.dim() == 0:
+                    batch_targets = batch_targets.unsqueeze(0)
                 
-                if epoch_scores:
-                    test_score_list.append(np.mean(epoch_scores))
-                else:
-                    test_score_list.append(0.0)
-        else:
-            # Skip evaluation for intermediate epochs, reuse last score
-            if test_score_list:
-                test_score_list.append(test_score_list[-1])
-            else:
-                test_score_list.append(0.0)
+                # Calculate loss                
+                loss = self.regression_loss_fn(predictions.cpu(), batch_targets.cpu())
+                loss.backward()
+                optimizer.step()
                 
-        # Print epoch progress - less frequent printing
-        if 1==1:#epoch % max(1, nb_epochs // 1) == 0 or epoch == nb_epochs - 1:
-            print(f"Epoch {epoch+1}/{nb_epochs} - Loss: {loss_list[-1]:.4f}, F1: {test_score_list[-1]:.4f}")
-
-    # UMAP visualization - only if requested and data available
-    if use_umap and 'UMAP_LIST' in locals() and len(UMAP_LIST) > 0:
-        print('Running UMAP')
-        UMAP_EMBEDDINGS = reducer.fit_transform(UMAP_LIST)
-
+                epoch_losses.append(loss.item())
+        
+        return np.mean(epoch_losses) if epoch_losses else 0.0
+    
+    def evaluate(self, test_set, use_umap=False, max_samples=None):
+        """Evaluate model on test set"""
+        self.model.eval()
+        scores = []
+        umap_data = {'embeddings': [], 'labels': []} if use_umap else None
+        
+        samples_processed = 0
+        with torch.no_grad():
+            for file, patches, ground_truth in test_set:
+                if max_samples and samples_processed >= max_samples:
+                    break
+                
+                ground_truth = ground_truth.to(self.device).float()
+                prediction = self._predict_image(patches, ground_truth, umap_data)
+                
+                # Post-process prediction
+                prediction_bool = prediction.astype(bool)
+                inverted_prediction = ~prediction_bool
+                biggest_mask = self._keep_largest_continuous_mask(inverted_prediction)
+                
+                plt.savefig(prediction, os.getcwd())
+                
+                # Display results
+                #display_segmentation(prediction, file)
+                #display_segmentation(biggest_mask, file)
+                
+                # Calculate F1 score
+                ground_truth_np = ground_truth.cpu().numpy()
+                score = f1_score(ground_truth_np.flatten(), prediction.flatten(), average='micro')
+                scores.append(score)
+                
+                samples_processed += 1
+        
+        avg_score = np.mean(scores) if scores else 0.0
+        
+        # UMAP visualization
+        if use_umap and umap_data['embeddings']:
+            self._create_umap_visualization(umap_data, avg_score)
+        
+        return avg_score
+    
+    def _predict_image(self, patches, ground_truth, umap_data=None):
+        """Predict segmentation for a single image"""
+        H_size, W_size = ground_truth.shape
+        H_patch, W_patch = H_size // self.patch_size, W_size // self.patch_size
+        prediction = torch.zeros(ground_truth.shape, device=self.device)
+        
+        for n, patch in enumerate(patches):
+            patch = patch.to(self.device).float()
+            nb_patches_h, nb_patches_w = patch.shape[-2] // self.patch_size, patch.shape[-1] // self.patch_size
+            
+            # Extract embedding
+            embeddings = self.model[0].forward_features(patch)["x_norm_patchtokens"]
+            embeddings = embeddings.reshape(nb_patches_h, nb_patches_w, self.feat_dim)
+            central_embedding = embeddings[nb_patches_h//2, nb_patches_w//2].unsqueeze(0)
+            
+            # Predict
+            output = self.model[1](central_embedding)
+            output_value = (output > 0.5).float()
+            
+            # Collect UMAP data
+            if umap_data is not None:
+                umap_data['embeddings'].append(central_embedding.cpu().numpy().flatten())
+                umap_data['labels'].append(output_value.cpu().numpy())
+            
+            # Update prediction map
+            h_coord = (n // W_patch) * self.patch_size
+            w_coord = (n % W_patch) * self.patch_size
+            prediction[h_coord:h_coord + self.patch_size, 
+                      w_coord:w_coord + self.patch_size] = output_value
+        
+        return prediction.cpu().numpy()
+    
+    def _keep_largest_continuous_mask(self, mask):
+        """Keep only the largest continuous region in the mask"""
+        labelled = measure.label(mask)
+        rp = measure.regionprops(labelled)
+        
+        if not rp:
+            return mask.astype(np.uint8)
+        
+        # Get size of largest cluster
+        max_size = max(region.area for region in rp)
+        
+        # Remove everything smaller than largest
+        out = morphology.remove_small_objects(mask, min_size=max_size-1)
+        return out.astype(np.uint8)
+    
+    def _create_umap_visualization(self, umap_data, test_score):
+        """Create UMAP visualization"""
+        reducer = umap.UMAP(random_state=42)
+        embeddings_2d = reducer.fit_transform(umap_data['embeddings'])
+        
+        labels = np.array(umap_data['labels'])
+        binary_labels = (labels > 0.5).astype(int)
+        
         plt.figure(figsize=(10, 8))
-        
-        # Convert to numpy arrays for easier handling
-        UMAP_PREDICTED_LABELS = np.array(UMAP_PREDICTED_LABELS)
-        
-        # Create binary labels for coloring
-        binary_labels = (UMAP_PREDICTED_LABELS > 0.5).astype(int)
-        
-        unique_labels = np.unique(binary_labels)
         colors = ['blue', 'red']  # Rest and PSD
         
-        for i, label in enumerate(unique_labels):
+        for label, color, name in zip([0, 1], colors, ['Rest', 'PSD']):
             mask = binary_labels == label
-            plot_label = 'Rest' if label == 0 else 'PSD'
-            if np.sum(mask) > 0:  # Only plot if there are points
-                plt.scatter(UMAP_EMBEDDINGS[mask, 0], UMAP_EMBEDDINGS[mask, 1], 
-                           c=colors[i], s=0.5, label=plot_label, marker='o', alpha=0.6)
+            if np.sum(mask) > 0:
+                plt.scatter(embeddings_2d[mask, 0], embeddings_2d[mask, 1], 
+                           c=color, s=1, label=name, alpha=0.6)
         
         plt.legend()
-        plt.title(f'UMAP - Final Test Score: {test_score_list[-1]:.4f}')
+        plt.title(f'UMAP Visualization - Test F1: {test_score:.4f}')
         plt.xlabel('UMAP 1')
         plt.ylabel('UMAP 2')
         plt.tight_layout()
         plt.show()
-
-    if return_statistics:
-        return loss_list, [], test_score_list, model.state_dict()  # Empty prediction_list
-    else:
-        return loss_list[-1], test_score_list[-1]
-
-def grow_mask(mask, file):
-    image, _, _ = load_image(file)
-    resized_image = resize_hdf_image(image, resize_size=resize_size).squeeze()
-    mask = mask.cpu().numpy() if isinstance(mask, torch.Tensor) else mask
-    mask_boundaries = np.where(mask != 0)
-    if mask_boundaries[0].size == 0 or mask_boundaries[1].size == 0:
-        print('No prediction found - returning original file')
-        return resized_image
-    else:
-        min_h, max_h = np.min(mask_boundaries[0]), np.max(mask_boundaries[0])
-        min_w, max_w = np.min(mask_boundaries[1]), np.max(mask_boundaries[1])
-        crop = resized_image[min_h-518:max_h+518, min_w-518:max_w+518][np.newaxis, np.newaxis, ...]
-        crop = torch.from_numpy(crop)
-        resized_crop = Trans.Resize(size=(resize_size, resize_size), interpolation=torchvision.transforms.InterpolationMode.BICUBIC, antialias=True)(crop)
-        stack = np.concatenate([resized_crop, resized_crop, resized_crop], axis=1)
-        return torch.from_numpy(stack).to(torch.float32).to(device)
-
-
-from skimage import measure, morphology
-def keep_largest_continuous_mask(mask):
-    labelled = measure.label(mask)
-    rp = measure.regionprops(labelled)
-
-    # get size of largest cluster
-    size = max([i.area for i in rp])
-
-    # remove everything smaller than largest
-    out = morphology.remove_small_objects(mask, min_size=size-1)
     
-    out = out.astype(np.uint8)
-    return out
-
-
-def fine_tuning(model, 
-                nb_iterations, 
-                nb_epochs_per_iteration,
-                nb_best_patches,
-                padding_size):
-
-    block_names = ['DINOv2', 'MLP Head']
-    index_list = []
-    for _ in range(nb_iterations):
-        index_list.extend([1, 0])  # Train MLP head first, then DINOv2
+    def train_component(self, training_index, epochs, train_set, test_set, 
+                       batch_size=32, eval_frequency=None):
+        """Train a specific component (adapter or MLP head)"""
+        component_names = ['DINOv2 Adapter', 'MLP Head']
+        print(f"Training {component_names[training_index]}...")
         
-    general_loss_list = [[], []]  # [DINOv2, MLP Head]
-    general_test_loss_list = [[], []]
-
-    # Get datasets with proper train/validation split
-    print("Loading training data...")
-    train_set = get_data_generator(split='training', 
-                                  nb_best_patches=nb_best_patches,
-                                  resize_size=resize_size, 
-                                  padding_size=padding_size, 
-                                  test_proportion=0.2,  # Use all training data
-                                  seed=42)
-
-    print("Loading test data...")
-    test_set = get_data_generator(split='test',  # Use validation split for testing
-                                 nb_best_patches=nb_best_patches,
-                                 resize_size=resize_size, 
-                                 padding_size=padding_size, 
-                                 test_proportion=0.8,   # Use all validation data
-                                 seed=42)
-
-    iteration = 1
-    for i, index in enumerate(tqdm(index_list, desc='Training Iterations')):
-        print(f"\n======================================================================== Training {block_names[index]} - Iteration {iteration} ========================================================================")
-
-        # CRITICAL FIX: Use the actual index variable, not hardcoded 1
-        loss, test_loss = training_block(model=model,
-                                       index=index,
-                                       nb_epochs=nb_epochs_per_iteration, 
-                                       train_set=train_set, 
-                                       test_set=test_set, 
-                                       return_statistics=False, 
-                                       use_umap=(i == 0))  # Only use UMAP for first iteration
-
-        print(f'Block trained: {block_names[index]} | Iteration: {iteration} | Train loss: {loss:.4f} | Test F1: {test_loss:.4f}')
+        optimizer = self.setup_optimizer(training_index)
+        eval_frequency = eval_frequency or max(1, epochs // 10)
         
-        general_loss_list[index].append(loss)
-        general_test_loss_list[index].append(test_loss)
+        train_losses = []
+        test_scores = []
         
-        # Only increment iteration counter after both blocks are trained
-        if index == 0:  # DINOv2 is trained second in each iteration
-            iteration += 1
+        for epoch in tqdm(range(epochs), desc=f'Training {component_names[training_index]}'):
+            # Training
+            train_loss = self.train_epoch(train_set, optimizer, training_index, batch_size)
+            train_losses.append(train_loss)
+            
+            # Evaluation
+            if epoch % eval_frequency == 0 or epoch == epochs - 1:
+                # Full evaluation on last epoch, limited during training
+                max_samples = None if epoch == epochs - 1 else 50
+                test_score = self.evaluate(test_set, max_samples=max_samples)
+                test_scores.append(test_score)
+                
+                print(f"Epoch {epoch+1}/{epochs} - Loss: {train_loss:.4f}, F1: {test_score:.4f}")
+            else:
+                # Reuse last test score for non-evaluation epochs
+                test_scores.append(test_scores[-1] if test_scores else 0.0)
         
-    return general_loss_list, general_test_loss_list 
+        return train_losses, test_scores
 
 
-def save_model_checkpoint(model, loss_lists, test_loss_lists, iteration):
+def save_checkpoint(model, loss_lists, test_loss_lists, iteration, filename=None):
     """Save model checkpoint with training statistics"""
+    if filename is None:
+        filename = f"checkpoint_iter_{iteration}.pth"
+    
     checkpoint = {
         'model_state_dict': model.state_dict(),
         'loss_lists': loss_lists,
@@ -368,74 +331,164 @@ def save_model_checkpoint(model, loss_lists, test_loss_lists, iteration):
         'iteration': iteration
     }
     
-    checkpoint_path = f"checkpoint_iter_{iteration}.pth"
-    torch.save(checkpoint, checkpoint_path)
-    print(f"Checkpoint saved: {checkpoint_path}")
+    torch.save(checkpoint, filename)
+    print(f"Checkpoint saved: {filename}")
 
 
-if __name__ == '__main__':
-    print("Starting fine-tuning process...")
-    
-    # OPTIMIZED: Reduced iterations and epochs for faster training
-    general_loss_list, general_test_loss_list = fine_tuning(model=augmented_model,
-                                                           nb_iterations=1,  # Reduced for testing
-                                                           nb_epochs_per_iteration=1,
-                                                           nb_best_patches=50,
-                                                           padding_size=2)  # Reduced for faster training
-
-    # Save final model
-    save_model_checkpoint(augmented_model, general_loss_list, general_test_loss_list, "final")
-
-    # Enhanced plotting
-    x_dino = [i+1 for i in range(len(general_loss_list[0]))]
-    x_mlp = [i+1 for i in range(len(general_loss_list[1]))]
-    
+def plot_training_results(loss_lists, test_lists):
+    """Plot comprehensive training results"""
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6), dpi=100)
-
+    
     # Training loss plot
-    if general_loss_list[0]:  # Check if DINOv2 was trained
-        ax1.plot(x_dino, general_loss_list[0], label='DINOv2 Train Loss', 
+    if loss_lists[0]:  # DINOv2
+        x_dino = list(range(1, len(loss_lists[0]) + 1))
+        ax1.plot(x_dino, loss_lists[0], label='DINOv2 Train Loss', 
                 color='blue', marker='o', linewidth=2)
-    if general_loss_list[1]:  # Check if MLP was trained
-        ax1.plot(x_mlp, general_loss_list[1], label='MLP Train Loss', 
+    
+    if loss_lists[1]:  # MLP
+        x_mlp = list(range(1, len(loss_lists[1]) + 1))
+        ax1.plot(x_mlp, loss_lists[1], label='MLP Train Loss', 
                 color='cyan', marker='s', linewidth=2)
+    
     ax1.set_ylabel('Train Loss')
     ax1.set_xlabel('Iterations')
     ax1.set_title('Training Loss Over Iterations')
     ax1.legend()
     ax1.grid(True, alpha=0.3)
-
+    
     # Test F1 score plot
-    if general_test_loss_list[0]:
-        ax2.plot(x_dino, general_test_loss_list[0], label='DINOv2 Test F1', 
+    if test_lists[0]:
+        x_dino = list(range(1, len(test_lists[0]) + 1))
+        ax2.plot(x_dino, test_lists[0], label='DINOv2 Test F1', 
                 color='red', marker='o', linewidth=2)
-    if general_test_loss_list[1]:
-        ax2.plot(x_mlp, general_test_loss_list[1], label='MLP Test F1', 
+    
+    if test_lists[1]:
+        x_mlp = list(range(1, len(test_lists[1]) + 1))
+        ax2.plot(x_mlp, test_lists[1], label='MLP Test F1', 
                 color='orange', marker='s', linewidth=2)
+    
     ax2.set_ylabel('Test F1 Score')
     ax2.set_xlabel('Iterations')
     ax2.set_title('Test F1 Score Over Iterations')
     ax2.legend()
     ax2.grid(True, alpha=0.3)
-
+    
     plt.tight_layout()
     plt.show()
-    
-    # Print comprehensive final results
-    print(f"\n" + "="*50)
+
+
+def print_final_results(loss_lists, test_lists):
+    """Print comprehensive final results"""
+    print(f"\n{'='*50}")
     print(f"FINAL TRAINING RESULTS")
-    print(f"="*50)
+    print(f"{'='*50}")
     
-    if general_loss_list[0] and general_test_loss_list[0]:
-        print(f"DINOv2 - Train Loss: {general_loss_list[0][-1]:.4f}, Test F1: {general_test_loss_list[0][-1]:.4f}")
-    if general_loss_list[1] and general_test_loss_list[1]:
-        print(f"MLP Head - Train Loss: {general_loss_list[1][-1]:.4f}, Test F1: {general_test_loss_list[1][-1]:.4f}")
+    component_names = ['DINOv2 Adapter', 'MLP Head']
     
-    # Calculate improvement
-    if len(general_test_loss_list[1]) > 1:
-        mlp_improvement = general_test_loss_list[1][-1] - general_test_loss_list[1][0]
-        print(f"MLP F1 Improvement: {mlp_improvement:+.4f}")
+    for i, name in enumerate(component_names):
+        if loss_lists[i] and test_lists[i]:
+            final_loss = loss_lists[i][-1]
+            final_f1 = test_lists[i][-1]
+            print(f"{name} - Train Loss: {final_loss:.4f}, Test F1: {final_f1:.4f}")
+            
+            # Calculate improvement
+            if len(test_lists[i]) > 1:
+                improvement = test_lists[i][-1] - test_lists[i][0]
+                print(f"{name} F1 Improvement: {improvement:+.4f}")
+
+
+def run_fine_tuning(nb_iterations=2, nb_epochs_per_iteration=10, 
+                   nb_best_patches=100, padding_size=2):
+    """Main fine-tuning function"""
+    print("Initializing fine-tuner...")
     
-    if len(general_test_loss_list[0]) > 1:
-        dino_improvement = general_test_loss_list[0][-1] - general_test_loss_list[0][0]
-        print(f"DINOv2 F1 Improvement: {dino_improvement:+.4f}")
+    # Initialize fine-tuner
+    fine_tuner = FineTuner(augmented_model, device, feat_dim, resize_size)
+    
+    # Load datasets
+    print("Loading datasets...")
+    train_set = list(get_data_generator(
+        split='training', 
+        nb_best_patches=nb_best_patches,
+        resize_size=resize_size, 
+        padding_size=padding_size, 
+        test_proportion=0.2,
+        seed=42)
+    )
+    
+    test_set = list(get_data_generator(
+        split='test',
+        nb_best_patches=nb_best_patches,
+        resize_size=resize_size, 
+        padding_size=padding_size, 
+        test_proportion=0.2,
+        seed=42)
+    )
+    
+    # Training schedule: alternating MLP Head (1) and DINOv2 Adapter (0)
+    training_schedule = []
+    for _ in range(nb_iterations):
+        training_schedule.extend([1, 0])  # MLP first, then adapter
+    
+    # Track results
+    loss_lists = [[], []]  # [DINOv2, MLP Head]
+    test_lists = [[], []]
+    
+    # Training loop
+    iteration = 1
+    for i, training_index in enumerate(training_schedule):
+        print(f"\n{'='*80}")
+        print(f"Iteration {iteration} - Training {'MLP Head' if training_index == 1 else 'DINOv2 Adapter'}")
+        print(f"{'='*80}")
+        
+        # Train component
+        train_losses, test_scores = fine_tuner.train_component(
+            training_index=training_index,
+            epochs=nb_epochs_per_iteration,
+            train_set=train_set,
+            test_set=test_set,
+            batch_size=32
+        )
+        
+        # Store results
+        final_loss = train_losses[-1] if train_losses else 0.0
+        final_score = test_scores[-1] if test_scores else 0.0
+        
+        loss_lists[training_index].append(final_loss)
+        test_lists[training_index].append(final_score)
+        
+        component_name = 'MLP Head' if training_index == 1 else 'DINOv2 Adapter'
+        print(f'{component_name} | Iteration: {iteration} | Loss: {final_loss:.4f} | F1: {final_score:.4f}')
+        
+        # Save checkpoint
+        if i % 2 == 1:  # After both components trained
+            save_checkpoint(fine_tuner.model, loss_lists, test_lists, iteration)
+            iteration += 1
+    
+    # Final evaluation with UMAP
+    print("\nRunning final evaluation with UMAP...")
+    final_score = fine_tuner.evaluate(test_set, use_umap=True)
+    print(f"Final Test F1 Score: {final_score:.4f}")
+    
+    # Save final model
+    save_checkpoint(fine_tuner.model, loss_lists, test_lists, "final")
+    
+    # Plot and print results
+    plot_training_results(loss_lists, test_lists)
+    print_final_results(loss_lists, test_lists)
+    
+    return loss_lists, test_lists, fine_tuner
+
+
+if __name__ == '__main__':
+    print("Starting fine-tuning process...")
+    
+    # Run fine-tuning with optimized parameters
+    loss_lists, test_lists, trained_model = run_fine_tuning(
+        nb_iterations=1,  # Reduced for testing
+        nb_epochs_per_iteration=5,  # Reduced for faster training
+        nb_best_patches=50,
+        padding_size=2
+    )
+    
+    print("\nFine-tuning completed successfully!")

@@ -33,15 +33,17 @@ total_params = params + frozen_params
 print(f'Proportion of trainable parameters when head frozen: {params / total_params * 100:.2f}%')
 
 
-
 class FineTuner:
     """Fine-tuning class for DINOv2 with adapter layers and MLP head"""
     
-    def __init__(self, augmented_model, device, feat_dim, resize_size, patch_size=None):
+    def __init__(self, augmented_model, device, feat_dim, resize_size, patch_size=None, 
+                 use_contrastive=False, contrastive_weight=0.1):
         self.device = device
         self.feat_dim = feat_dim
         self.resize_size = resize_size
         self.patch_size = patch_size or augmented_model[0].patch_size
+        self.use_contrastive = use_contrastive
+        self.contrastive_weight = contrastive_weight
         
         # Create classification model
         self.classification_head = classification_head
@@ -49,7 +51,8 @@ class FineTuner:
         
         # Loss functions
         self.regression_loss_fn = nn.L1Loss(reduction='mean')
-        self.contrastive_loss_fn = NTXentLoss()
+        if use_contrastive:
+            self.contrastive_loss_fn = NTXentLoss()
         
     def setup_optimizer(self, training_index, learning_rate=3e-4):
         """Setup optimizer based on which component to train"""
@@ -97,69 +100,84 @@ class FineTuner:
         return torch.optim.Adam(trainable_params, lr=learning_rate)
     
     def extract_patch_features(self, patches, ground_truth):
-        """Extract features and targets from patches"""
+        """Extract features and targets from patches - Fixed version"""
         H_size, W_size = ground_truth.shape
         H_patch, W_patch = H_size // self.patch_size, W_size // self.patch_size
         
         all_embeddings = []
         all_targets = []
         
-        for n, patch in enumerate(patches):
-            patch = patch.to(self.device).float()
-            nb_patches_h, nb_patches_w = patch.shape[-2] // self.patch_size, patch.shape[-1] // self.patch_size
-            
-            # Extract embeddings
-            embeddings = self.model[0].forward_features(patch)["x_norm_patchtokens"]
-            embeddings = embeddings.reshape(nb_patches_h, nb_patches_w, self.feat_dim)
-            central_embedding = embeddings[nb_patches_h//2, nb_patches_w//2]
-            all_embeddings.append(central_embedding)
-            
-            # Calculate target
-            h_coord = n // W_patch
-            w_coord = n % W_patch
-            gt_patch = ground_truth[h_coord:h_coord + self.patch_size, 
-                                  w_coord:w_coord + self.patch_size]
-            target = gt_patch.mean()
-            all_targets.append(target)
+        # Use torch.no_grad() to avoid building computation graph unnecessarily
+        with torch.no_grad():
+            for n, patch in enumerate(patches):
+                patch = patch.to(self.device).float()
+                nb_patches_h, nb_patches_w = patch.shape[-2] // self.patch_size, patch.shape[-1] // self.patch_size
+                
+                # Extract embeddings
+                embeddings = self.model[0].forward_features(patch)["x_norm_patchtokens"]
+                embeddings = embeddings.reshape(nb_patches_h, nb_patches_w, self.feat_dim)
+                central_embedding = embeddings[nb_patches_h//2, nb_patches_w//2]
+                all_embeddings.append(central_embedding)
+                
+                # Calculate target
+                h_coord = n // W_patch
+                w_coord = n % W_patch
+                gt_patch = ground_truth[h_coord:h_coord + self.patch_size, 
+                                      w_coord:w_coord + self.patch_size]
+                target = gt_patch.mean()
+                all_targets.append(target)
         
+        # Stack tensors - they will automatically require gradients if model is in train mode
         all_embeddings_tensor = torch.stack(all_embeddings)
         all_targets_tensor = torch.stack(all_targets)
         
-        all_embeddings_tensor.requires_grad = True
-        all_targets_tensor.requires_grad = True
-        
         return all_embeddings_tensor, all_targets_tensor
     
+    def compute_contrastive_loss(self, embeddings, targets):
+        """Compute contrastive loss separately"""
+        if not self.use_contrastive:
+            return torch.tensor(0.0, device=self.device)
+        
+        # Convert targets to discrete labels for contrastive learning
+        discrete_targets = (targets > 0.5).long()
+        return self.contrastive_loss_fn(embeddings, discrete_targets)
+    
     def train_epoch(self, train_set, optimizer, training_index, batch_size=32):
-        """Train for one epoch"""
+        """Fixed training epoch function"""
         self.model.train()
         epoch_losses = []
+        regression_losses = []
+        contrastive_losses = []
         
         for file, patches, ground_truth in train_set:
             ground_truth = ground_truth.to(self.device).float()
             
-            # Extract features
+            # Extract features once per image
             embeddings, targets = self.extract_patch_features(patches, ground_truth)
             
             if len(embeddings) == 0:
                 continue
             
-            # Contrastive loss
-            optimizer.zero_grad()
-            contrastive_loss = self.contrastive_loss_fn(embeddings, targets)
-            contrastive_loss.backward()
-            optimizer.step()
-            
-            # Batch processing for regression
+            # Process in batches to avoid memory issues
             num_patches = len(embeddings)
             for i in range(0, num_patches, batch_size):
+                optimizer.zero_grad()  # Clear gradients for each batch
+                
                 end_idx = min(i + batch_size, num_patches)
-                batch_embeddings = embeddings[i:end_idx]
+                batch_embeddings = embeddings[i:end_idx].detach().requires_grad_(True)
                 batch_targets = targets[i:end_idx]
                 
-                # Forward pass
+                total_loss = torch.tensor(0.0, device=self.device)
+                
+                # Contrastive loss (if enabled)
+                if self.use_contrastive:
+                    contrastive_loss = self.compute_contrastive_loss(batch_embeddings, batch_targets)
+                    total_loss += self.contrastive_weight * contrastive_loss
+                    contrastive_losses.append(contrastive_loss.item())
+                
+                # Regression loss
                 predictions = self.model[1](batch_embeddings).squeeze()
-                predictions = nn.Sigmoid()(predictions)
+                predictions = torch.sigmoid(predictions)  # Use torch.sigmoid instead of nn.Sigmoid()
                 
                 # Handle single prediction case
                 if predictions.dim() == 0:
@@ -167,17 +185,29 @@ class FineTuner:
                 if batch_targets.dim() == 0:
                     batch_targets = batch_targets.unsqueeze(0)
                 
-                # Calculate loss                
-                loss = self.regression_loss_fn(predictions.cpu(), batch_targets.cpu())
-                loss.backward()
+                # Calculate regression loss (keep everything on same device)
+                regression_loss = self.regression_loss_fn(predictions, batch_targets)
+                total_loss += regression_loss
+                regression_losses.append(regression_loss.item())
+                
+                # Backward pass
+                total_loss.backward()
                 optimizer.step()
                 
-                epoch_losses.append(loss.item())
+                epoch_losses.append(total_loss.item())
         
-        return np.mean(epoch_losses) if epoch_losses else 0.0
+        # Print detailed loss information
+        avg_total_loss = np.mean(epoch_losses) if epoch_losses else 0.0
+        avg_regression_loss = np.mean(regression_losses) if regression_losses else 0.0
+        avg_contrastive_loss = np.mean(contrastive_losses) if contrastive_losses else 0.0
+        
+        if self.use_contrastive:
+            print(f"  Regression Loss: {avg_regression_loss:.4f}, Contrastive Loss: {avg_contrastive_loss:.4f}")
+        
+        return avg_total_loss
     
-    def evaluate(self, test_set, use_umap=False, max_samples=None):
-        """Evaluate model on test set"""
+    def evaluate(self, test_set, use_umap=False, max_samples=None, metric='jaccard'):
+        """Fixed evaluation function with consistent metrics"""
         self.model.eval()
         scores = []
         umap_data = {'embeddings': [], 'labels': []} if use_umap else None
@@ -191,20 +221,31 @@ class FineTuner:
                 ground_truth = ground_truth.to(self.device).float()
                 prediction = self._predict_image(patches, ground_truth, umap_data)
                 
-                # Post-process prediction
+                # Post-process prediction - USE the result this time
                 prediction_bool = prediction.astype(bool)
                 inverted_prediction = ~prediction_bool
-                biggest_mask = self._keep_largest_continuous_mask(inverted_prediction)
+                processed_prediction = self._keep_largest_continuous_mask(inverted_prediction)
                 
-                # Calculate F1 score
-                ground_truth_np = ground_truth.cpu().numpy()
-                #score = f1_score(ground_truth_np.flatten(), prediction.flatten(), average='micro')
-                score = jaccard_score(ground_truth_np.flatten(), prediction.flatten())
+                # Use processed prediction for scoring
+                final_prediction = (~processed_prediction.astype(bool)).astype(int)
+                
+                # Calculate score with chosen metric
+                ground_truth_np = ground_truth.cpu().numpy().astype(int)
+                
+                if metric == 'jaccard':
+                    score = jaccard_score(ground_truth_np.flatten(), final_prediction.flatten(), 
+                                        zero_division=0)
+                elif metric == 'f1':
+                    score = f1_score(ground_truth_np.flatten(), final_prediction.flatten(), 
+                                   average='binary', zero_division=0)
+                else:
+                    raise ValueError("metric must be 'jaccard' or 'f1'")
+                
                 scores.append(score)
                 
-                # Display results
-                #display_segmentation(prediction, file, score)
-                #display_segmentation(ground_truth.cpu().numpy(), file, score)
+                # Optional: Display results (uncomment if needed)
+                # display_segmentation(final_prediction, file, score)
+                # display_segmentation(ground_truth_np, file, score)
                 
                 samples_processed += 1
         
@@ -217,7 +258,7 @@ class FineTuner:
         return avg_score
     
     def _predict_image(self, patches, ground_truth, umap_data=None):
-        """Predict segmentation for a single image"""
+        """Fixed prediction function"""
         H_size, W_size = ground_truth.shape
         H_patch, W_patch = H_size // self.patch_size, W_size // self.patch_size
         prediction = torch.zeros(ground_truth.shape, device=self.device)
@@ -233,7 +274,7 @@ class FineTuner:
             
             # Predict
             output = self.model[1](central_embedding)
-            output = nn.Sigmoid()(output)
+            output = torch.sigmoid(output)  # Use torch.sigmoid
             output_value = (output > 0.5).float()
             
             # Collect UMAP data
@@ -251,6 +292,9 @@ class FineTuner:
     
     def _keep_largest_continuous_mask(self, mask):
         """Keep only the largest continuous region in the mask"""
+        if not np.any(mask):  # Handle empty mask
+            return mask.astype(np.uint8)
+            
         labelled = measure.label(mask)
         rp = measure.regionprops(labelled)
         
@@ -265,11 +309,21 @@ class FineTuner:
         return out.astype(np.uint8)
     
     def _create_umap_visualization(self, umap_data, test_score):
-        """Create UMAP visualization"""
+        """Fixed UMAP visualization"""
+        if len(umap_data['embeddings']) == 0:
+            print("No embeddings available for UMAP visualization")
+            return
+            
         reducer = umap.UMAP(random_state=42)
-        embeddings_2d = reducer.fit_transform(umap_data['embeddings'])
+        embeddings_array = np.array(umap_data['embeddings'])
         
-        labels = np.array(umap_data['labels'])
+        # Handle single embedding case
+        if embeddings_array.ndim == 1:
+            embeddings_array = embeddings_array.reshape(1, -1)
+            
+        embeddings_2d = reducer.fit_transform(embeddings_array)
+        
+        labels = np.array(umap_data['labels']).flatten()
         binary_labels = (labels > 0.5).astype(int)
         
         plt.figure(figsize=(10, 8))
@@ -282,15 +336,15 @@ class FineTuner:
                            c=color, s=1, label=name, alpha=0.6)
         
         plt.legend()
-        plt.title(f'UMAP Visualization - Test IoU: {test_score:.4f}')
+        plt.title(f'UMAP Visualization - Test Score: {test_score:.4f}')
         plt.xlabel('UMAP 1')
         plt.ylabel('UMAP 2')
         plt.tight_layout()
         plt.show()
     
     def train_component(self, training_index, epochs, train_set, test_set, 
-                       batch_size=32, eval_frequency=10):
-        """Train a specific component (adapter or MLP head)"""
+                       batch_size=32, eval_frequency=10, metric='jaccard'):
+        """Fixed training component function"""
         component_names = ['DINOv2 Adapter', 'MLP Head']
         print(f"Training {component_names[training_index]}...")
         
@@ -309,10 +363,11 @@ class FineTuner:
             if epoch % eval_frequency == 0 or epoch == epochs - 1:
                 # Full evaluation on last epoch, limited during training
                 max_samples = None if epoch == epochs - 1 else 50
-                test_score = self.evaluate(test_set, max_samples=max_samples)
+                test_score = self.evaluate(test_set, max_samples=max_samples, metric=metric)
                 test_scores.append(test_score)
                 
-                print(f"Epoch {epoch+1}/{epochs} - Loss: {train_loss:.4f}, IoU: {test_score:.4f}")
+                metric_name = 'IoU' if metric == 'jaccard' else 'F1'
+                print(f"Epoch {epoch+1}/{epochs} - Loss: {train_loss:.4f}, {metric_name}: {test_score:.4f}")
             else:
                 # Reuse last test score for non-evaluation epochs
                 test_scores.append(test_scores[-1] if test_scores else 0.0)
@@ -336,8 +391,8 @@ def save_checkpoint(model, loss_lists, test_loss_lists, iteration, filename=None
     print(f"Checkpoint saved: {filename}")
 
 
-def plot_training_results(loss_lists, test_lists):
-    """Plot comprehensive training results"""
+def plot_training_results(loss_lists, test_lists, metric='jaccard'):
+    """Fixed plotting function"""
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6), dpi=100)
     
     # Training loss plot
@@ -357,20 +412,22 @@ def plot_training_results(loss_lists, test_lists):
     ax1.legend()
     ax1.grid(True, alpha=0.3)
     
-    # Test F1 score plot
+    # Test score plot
+    metric_name = 'IoU' if metric == 'jaccard' else 'F1'
+    
     if test_lists[0]:
         x_dino = list(range(1, len(test_lists[0]) + 1))
-        ax2.plot(x_dino, test_lists[0], label='DINOv2 Test IoU', 
+        ax2.plot(x_dino, test_lists[0], label=f'DINOv2 Test {metric_name}', 
                 color='red', marker='o', linewidth=2)
     
     if test_lists[1]:
         x_mlp = list(range(1, len(test_lists[1]) + 1))
-        ax2.plot(x_mlp, test_lists[1], label='MLP Test IoU', 
+        ax2.plot(x_mlp, test_lists[1], label=f'MLP Test {metric_name}', 
                 color='orange', marker='s', linewidth=2)
     
-    ax2.set_ylabel('Test IoU Score')
+    ax2.set_ylabel(f'Test {metric_name} Score')
     ax2.set_xlabel('Iterations')
-    ax2.set_title('Test IoU Score Over Iterations')
+    ax2.set_title(f'Test {metric_name} Score Over Iterations')
     ax2.legend()
     ax2.grid(True, alpha=0.3)
     
@@ -378,33 +435,37 @@ def plot_training_results(loss_lists, test_lists):
     plt.show()
 
 
-def print_final_results(loss_lists, test_lists):
+def print_final_results(loss_lists, test_lists, metric='jaccard'):
     """Print comprehensive final results"""
     print(f"\n{'='*50}")
     print(f"FINAL TRAINING RESULTS")
     print(f"{'='*50}")
     
     component_names = ['DINOv2 Adapter', 'MLP Head']
+    metric_name = 'IoU' if metric == 'jaccard' else 'F1'
     
     for i, name in enumerate(component_names):
         if loss_lists[i] and test_lists[i]:
             final_loss = loss_lists[i][-1]
-            final_f1 = test_lists[i][-1]
-            print(f"{name} - Train Loss: {final_loss:.4f}, Test IoU: {final_f1:.4f}")
+            final_score = test_lists[i][-1]
+            print(f"{name} - Train Loss: {final_loss:.4f}, Test {metric_name}: {final_score:.4f}")
             
             # Calculate improvement
             if len(test_lists[i]) > 1:
                 improvement = test_lists[i][-1] - test_lists[i][0]
-                print(f"{name} IoU Improvement: {improvement:+.4f}")
+                print(f"{name} {metric_name} Improvement: {improvement:+.4f}")
 
 
 def run_fine_tuning(nb_iterations=2, nb_epochs_per_iteration=10, 
-                   nb_best_patches=100, padding_size=2):
-    """Main fine-tuning function"""
+                   nb_best_patches=100, padding_size=2, use_contrastive=False,
+                   contrastive_weight=0.1, metric='jaccard'):
+    """Fixed main fine-tuning function"""
     print("Initializing fine-tuner...")
     
-    # Initialize fine-tuner
-    fine_tuner = FineTuner(augmented_model, device, feat_dim, resize_size)
+    # Initialize fine-tuner with contrastive learning option
+    fine_tuner = FineTuner(augmented_model, device, feat_dim, resize_size,
+                          use_contrastive=use_contrastive, 
+                          contrastive_weight=contrastive_weight)
     
     # Load datasets
     print("Loading datasets...")
@@ -424,6 +485,7 @@ def run_fine_tuning(nb_iterations=2, nb_epochs_per_iteration=10,
         test_proportion=0.2,
         seed=42)
     )
+    
     # Training schedule: alternating MLP Head (1) and DINOv2 Adapter (0)
     training_schedule = []
     for _ in range(nb_iterations):
@@ -437,7 +499,8 @@ def run_fine_tuning(nb_iterations=2, nb_epochs_per_iteration=10,
     iteration = 1
     for i, training_index in enumerate(training_schedule):
         print(f"\n{'='*80}")
-        print(f"Iteration {iteration} - Training {'MLP Head' if training_index == 1 else 'DINOv2 Adapter'}")
+        component_name = 'MLP Head' if training_index == 1 else 'DINOv2 Adapter'
+        print(f"Iteration {iteration} - Training {component_name}")
         print(f"{'='*80}")
         
         # Train component
@@ -446,7 +509,8 @@ def run_fine_tuning(nb_iterations=2, nb_epochs_per_iteration=10,
             epochs=nb_epochs_per_iteration,
             train_set=train_set,
             test_set=test_set,
-            batch_size=32
+            batch_size=32,
+            metric=metric
         )
         
         # Store results
@@ -456,25 +520,26 @@ def run_fine_tuning(nb_iterations=2, nb_epochs_per_iteration=10,
         loss_lists[training_index].append(final_loss)
         test_lists[training_index].append(final_score)
         
-        component_name = 'MLP Head' if training_index == 1 else 'DINOv2 Adapter'
-        print(f'{component_name} | Iteration: {iteration} | Loss: {final_loss:.4f} | IoU: {final_score:.4f}')
+        metric_name = 'IoU' if metric == 'jaccard' else 'F1'
+        print(f'{component_name} | Iteration: {iteration} | Loss: {final_loss:.4f} | {metric_name}: {final_score:.4f}')
         
-        # Save checkpoint
+        # Save checkpoint every full iteration (after both components)
         if i % 2 == 1:  # After both components trained
-            #save_checkpoint(fine_tuner.model, loss_lists, test_lists, iteration)
+            save_checkpoint(fine_tuner.model, loss_lists, test_lists, iteration)
             iteration += 1
     
     # Final evaluation with UMAP
     print("\nRunning final evaluation with UMAP...")
-    final_score = fine_tuner.evaluate(test_set, use_umap=True)
-    print(f"Final Test IoU Score: {final_score:.4f}")
+    final_score = fine_tuner.evaluate(test_set, use_umap=True, metric=metric)
+    metric_name = 'IoU' if metric == 'jaccard' else 'F1'
+    print(f"Final Test {metric_name} Score: {final_score:.4f}")
     
     # Save final model
-    #save_checkpoint(fine_tuner.model, loss_lists, test_lists, "final")
+    save_checkpoint(fine_tuner.model, loss_lists, test_lists, "final")
     
     # Plot and print results
-    plot_training_results(loss_lists, test_lists)
-    print_final_results(loss_lists, test_lists)
+    plot_training_results(loss_lists, test_lists, metric)
+    print_final_results(loss_lists, test_lists, metric)
     
     return loss_lists, test_lists, fine_tuner
 
@@ -486,8 +551,11 @@ if __name__ == '__main__':
     loss_lists, test_lists, trained_model = run_fine_tuning(
         nb_iterations=1,  # Reduced for testing
         nb_epochs_per_iteration=10,  # Reduced for faster training
-        nb_best_patches=10,
-        padding_size=2
+        nb_best_patches=50,
+        padding_size=2,
+        use_contrastive=True,  # Disable contrastive learning by default
+        contrastive_weight=0.1,
+        metric='jaccard'  # Use Jaccard (IoU) by default
     )
     
     print("\nFine-tuning completed successfully!")

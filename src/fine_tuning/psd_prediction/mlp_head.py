@@ -1,8 +1,6 @@
 import numpy as np
 from torch import nn
 
-from src.setup import device, feat_dim
-
 def init_model(module):
     if isinstance(module, nn.Linear):
         nn.init.xavier_normal_(module.weight)
@@ -35,7 +33,3 @@ class Psd_Pred_MLP_Head(nn.Module):
 
     def forward(self, x):
         return self.stack(x)
-    
-    
-detection_head = Psd_Pred_MLP_Head(device=device, nb_outputs=1, feat_dim=feat_dim)
-classification_head = Psd_Pred_MLP_Head(device=device, nb_outputs=6, feat_dim=feat_dim)

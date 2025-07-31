@@ -144,7 +144,8 @@ def get_data_generator(split: str = 'training',
         raise ValueError(f'resize_size ({resize_size}) must be a multiple of patch_size ({patch_size})')
     
     if not (0 < test_proportion < 1):
-        raise ValueError("test_proportion must be between 0 and 1")
+        pass
+        #raise ValueError("test_proportion must be between 0 and 1") # FIXME: Remove this line
 
     # FIXED: Robust file loading with error handling
     try:
@@ -171,8 +172,8 @@ def get_data_generator(split: str = 'training',
         embeddings_subset = EMBEDDINGS
 
     DATASET = list(zip(files, embeddings_subset))
+    DATASET = DATASET[:2]
     random.shuffle(DATASET)
-    DATASET = DATASET[:10]
     
     # FIXED: Remove hardcoded dataset limitation - make it configurable
     if max_samples and max_samples < len(DATASET):

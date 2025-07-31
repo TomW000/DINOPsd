@@ -4,6 +4,7 @@ import numpy as np
 from tqdm import tqdm
 import os 
 import matplotlib.pyplot as plt
+import seaborn as sns
 import umap
 from sklearn.metrics import f1_score, jaccard_score
 import torchvision
@@ -11,49 +12,74 @@ import torchvision.transforms as Trans
 from pytorch_metric_learning.losses import NTXentLoss
 from skimage import measure, morphology
 
-from src.setup import model, device, model_weights_path, resize_size, feat_dim, neurotransmitters
+from src.setup import device, model_weights_path, resize_size, feat_dim, neurotransmitters, model_size
 from src.perso_utils import load_image
 from src.analysis_utils import resize_hdf_image
-from src.fine_tuning.adaptor.AdaptFormer import model
-from src.fine_tuning.psd_prediction.mlp_head import detection_head, classification_head
+from src.fine_tuning.adaptor.AdaptFormer import AdaptMLP
+from src.fine_tuning.psd_prediction.mlp_head import Psd_Pred_MLP_Head
 from src.fine_tuning.display_results import display_segmentation, confusion_matrix
 from .sliding_window_dataset import get_data_generator
-
-
-augmented_model = nn.Sequential(model, detection_head) # type: ignore
-augmented_model.eval()
-augmented_model.to(device)
-
-
-trainable_params = [p for p in augmented_model.parameters() if p.requires_grad]
-params = sum([np.prod(p.size()) for p in trainable_params])
-frozen_params_list = [p for p in augmented_model.parameters() if not p.requires_grad]
-frozen_params = sum([np.prod(p.size()) for p in frozen_params_list])
-total_params = params + frozen_params
-print(f'Proportion of trainable parameters when head frozen: {params / total_params * 100:.2f}%')
 
 
 class FineTuner:
     """Fine-tuning class for DINOv2 with adapter layers and MLP head"""
     
-    def __init__(self, augmented_model, device, feat_dim, resize_size, patch_size=None, 
+    def __init__(self, model_size, device, feat_dim, resize_size, 
                  use_contrastive=False, contrastive_weight=0.1):
+        self.model_size = model_size
         self.device = device
         self.feat_dim = feat_dim
         self.resize_size = resize_size
-        self.patch_size = patch_size or augmented_model[0].patch_size
         self.use_contrastive = use_contrastive
         self.contrastive_weight = contrastive_weight
         
         # Create classification model
-        self.classification_head = classification_head
-        self.model = augmented_model.to(device)
+        self.model = self.initialize_model()
+        self.patch_size = self.model[0].patch_size
         
         # Loss functions
-        self.regression_loss_fn = nn.L1Loss(reduction='mean')
+        self.regression_loss_fn = nn.BCEWithLogitsLoss(reduction='sum')
         if use_contrastive:
             self.contrastive_loss_fn = NTXentLoss()
-        
+
+    def initialize_model(self):
+        model = torch.hub.load('facebookresearch/dinov2', f'dinov2_vit{self.model_size[0]}14_reg')
+        model.to(self.device) # type: ignore
+
+        for param in model.parameters(): # type: ignore
+            param.requires_grad = False
+
+        for k in range(len(list(model.blocks))): # type: ignore
+
+            mlp = model.blocks[k].mlp# type: ignore
+            in_dim = model.blocks[k].norm2.normalized_shape[0]# type: ignore
+            mid_dim = int(model.blocks[k].norm2.normalized_shape[0]/10) #TODO: important parameter # type: ignore
+            
+            adapter = AdaptMLP(self.device,
+                            mlp, 
+                            in_dim, 
+                            mid_dim, 
+                            dropout=0.0, 
+                            s=0.1)
+
+            model.blocks[k].mlp = adapter# type: ignore
+
+        detection_head = Psd_Pred_MLP_Head(device=device, 
+                                        nb_outputs=1, 
+                                        feat_dim=feat_dim)
+
+        augmented_model = nn.Sequential(model, detection_head) # type: ignore
+        augmented_model.eval()
+
+        trainable_params = [p for p in augmented_model.parameters() if p.requires_grad]
+        params = sum([np.prod(p.size()) for p in trainable_params])
+        frozen_params_list = [p for p in augmented_model.parameters() if not p.requires_grad]
+        frozen_params = sum([np.prod(p.size()) for p in frozen_params_list])
+        total_params = params + frozen_params
+        print(f'Proportion of trainable parameters when head frozen: {params / total_params * 100:.2f}%')
+
+        return augmented_model.to(device)
+
     def setup_optimizer(self, training_index, learning_rate=3e-4):
         """Setup optimizer based on which component to train"""
         if training_index == 1:  # Train MLP head
@@ -99,7 +125,7 @@ class FineTuner:
         print(f"Training DINOv2 adapter layers - {len(trainable_params)} parameters")
         return torch.optim.Adam(trainable_params, lr=learning_rate)
     
-    def extract_patch_features(self, patches, ground_truth):
+    def extract_patch_features(self, training_index, patches, ground_truth):
         """Extract features and targets from patches - Fixed version"""
         H_size, W_size = ground_truth.shape
         H_patch, W_patch = H_size // self.patch_size, W_size // self.patch_size
@@ -108,24 +134,29 @@ class FineTuner:
         all_targets = []
         
         # Use torch.no_grad() to avoid building computation graph unnecessarily
-        with torch.no_grad():
-            for n, patch in enumerate(patches):
-                patch = patch.to(self.device).float()
-                nb_patches_h, nb_patches_w = patch.shape[-2] // self.patch_size, patch.shape[-1] // self.patch_size
-                
-                # Extract embeddings
+        
+        for n, patch in enumerate(patches):
+            patch = patch.to(self.device).float()
+            nb_patches_h, nb_patches_w = patch.shape[-2] // self.patch_size, patch.shape[-1] // self.patch_size
+            
+            # Extract embeddings
+            if training_index == 1:
+                with torch.no_grad():
+                    embeddings = self.model[0].forward_features(patch)["x_norm_patchtokens"]
+            else:
                 embeddings = self.model[0].forward_features(patch)["x_norm_patchtokens"]
-                embeddings = embeddings.reshape(nb_patches_h, nb_patches_w, self.feat_dim)
-                central_embedding = embeddings[nb_patches_h//2, nb_patches_w//2]
-                all_embeddings.append(central_embedding)
                 
-                # Calculate target
-                h_coord = n // W_patch
-                w_coord = n % W_patch
-                gt_patch = ground_truth[h_coord:h_coord + self.patch_size, 
-                                      w_coord:w_coord + self.patch_size]
-                target = gt_patch.mean()
-                all_targets.append(target)
+            embeddings = embeddings.reshape(nb_patches_h, nb_patches_w, self.feat_dim)
+            central_embedding = embeddings[nb_patches_h//2, nb_patches_w//2]
+            all_embeddings.append(central_embedding)
+            
+            # Calculate target
+            h_coord = (n // W_patch) * self.patch_size
+            w_coord = (n % W_patch) * self.patch_size
+            gt_patch = ground_truth[h_coord:h_coord + self.patch_size, 
+                                    w_coord:w_coord + self.patch_size]
+            target = gt_patch.mean()
+            all_targets.append(target)
         
         # Stack tensors - they will automatically require gradients if model is in train mode
         all_embeddings_tensor = torch.stack(all_embeddings)
@@ -153,7 +184,7 @@ class FineTuner:
             ground_truth = ground_truth.to(self.device).float()
             
             # Extract features once per image
-            embeddings, targets = self.extract_patch_features(patches, ground_truth)
+            embeddings, targets = self.extract_patch_features(training_index, patches, ground_truth)
             
             if len(embeddings) == 0:
                 continue
@@ -162,22 +193,31 @@ class FineTuner:
             num_patches = len(embeddings)
             for i in range(0, num_patches, batch_size):
                 optimizer.zero_grad()  # Clear gradients for each batch
-                
-                end_idx = min(i + batch_size, num_patches)
-                batch_embeddings = embeddings[i:end_idx].detach().requires_grad_(True)
-                batch_targets = targets[i:end_idx]
-                
                 total_loss = torch.tensor(0.0, device=self.device)
                 
+                end_idx = min(i + batch_size, num_patches)
+                if training_index == 1:
+                    batch_embeddings = embeddings[i:end_idx]#.detach().requires_grad_(True)
+                else:
+                    batch_embeddings = embeddings[i:end_idx]
+                    
+                batch_targets = targets[i:end_idx]
+                
                 # Contrastive loss (if enabled)
-                if self.use_contrastive:
+                if self.use_contrastive and training_index == 0:
                     contrastive_loss = self.compute_contrastive_loss(batch_embeddings, batch_targets)
                     total_loss += self.contrastive_weight * contrastive_loss
                     contrastive_losses.append(contrastive_loss.item())
                 
                 # Regression loss
                 predictions = self.model[1](batch_embeddings).squeeze()
-                predictions = torch.sigmoid(predictions)  # Use torch.sigmoid instead of nn.Sigmoid()
+                
+                '''
+                plt.imshow(predictions.unsqueeze(0).detach().cpu().numpy())
+                plt.show()  
+                plt.imshow(batch_targets.unsqueeze(0).detach().cpu().numpy())
+                plt.show()
+                '''
                 
                 # Handle single prediction case
                 if predictions.dim() == 0:
@@ -187,6 +227,9 @@ class FineTuner:
                 
                 # Calculate regression loss (keep everything on same device)
                 regression_loss = self.regression_loss_fn(predictions, batch_targets)
+                
+                print(f"  Regression Loss: {regression_loss.item():.4f}")
+                
                 total_loss += regression_loss
                 regression_losses.append(regression_loss.item())
                 
@@ -201,7 +244,7 @@ class FineTuner:
         avg_regression_loss = np.mean(regression_losses) if regression_losses else 0.0
         avg_contrastive_loss = np.mean(contrastive_losses) if contrastive_losses else 0.0
         
-        if self.use_contrastive:
+        if self.use_contrastive and training_index == 0:
             print(f"  Regression Loss: {avg_regression_loss:.4f}, Contrastive Loss: {avg_contrastive_loss:.4f}")
         
         return avg_total_loss
@@ -233,10 +276,10 @@ class FineTuner:
                 ground_truth_np = ground_truth.cpu().numpy().astype(int)
                 
                 if metric == 'jaccard':
-                    score = jaccard_score(ground_truth_np.flatten(), final_prediction.flatten(), 
-                                        zero_division=0)
+                    score = jaccard_score(ground_truth_np, prediction, # FIXME: use final_prediction
+                                        zero_division=0, average='micro')
                 elif metric == 'f1':
-                    score = f1_score(ground_truth_np.flatten(), final_prediction.flatten(), 
+                    score = f1_score(ground_truth_np.flatten(), prediction.flatten(), 
                                    average='binary', zero_division=0)
                 else:
                     raise ValueError("metric must be 'jaccard' or 'f1'")
@@ -244,8 +287,8 @@ class FineTuner:
                 scores.append(score)
                 
                 # Optional: Display results (uncomment if needed)
-                # display_segmentation(final_prediction, file, score)
-                # display_segmentation(ground_truth_np, file, score)
+                #display_segmentation(final_prediction, file, score)
+                #display_segmentation(ground_truth_np, file, score)
                 
                 samples_processed += 1
         
@@ -274,8 +317,7 @@ class FineTuner:
             
             # Predict
             output = self.model[1](central_embedding)
-            output = torch.sigmoid(output)  # Use torch.sigmoid
-            output_value = (output > 0.5).float()
+            output_value = (torch.sigmoid(output) > 0.5).float()
             
             # Collect UMAP data
             if umap_data is not None:
@@ -287,7 +329,7 @@ class FineTuner:
             w_coord = (n % W_patch) * self.patch_size
             prediction[h_coord:h_coord + self.patch_size, 
                       w_coord:w_coord + self.patch_size] = output_value
-        
+
         return prediction.cpu().numpy()
     
     def _keep_largest_continuous_mask(self, mask):
@@ -343,7 +385,7 @@ class FineTuner:
         plt.show()
     
     def train_component(self, training_index, epochs, train_set, test_set, 
-                       batch_size=32, eval_frequency=10, metric='jaccard'):
+                       batch_size=32, eval_frequency=1, metric='jaccard'):
         """Fixed training component function"""
         component_names = ['DINOv2 Adapter', 'MLP Head']
         print(f"Training {component_names[training_index]}...")
@@ -463,7 +505,7 @@ def run_fine_tuning(nb_iterations=2, nb_epochs_per_iteration=10,
     print("Initializing fine-tuner...")
     
     # Initialize fine-tuner with contrastive learning option
-    fine_tuner = FineTuner(augmented_model, device, feat_dim, resize_size,
+    fine_tuner = FineTuner('small', device, feat_dim, resize_size,
                           use_contrastive=use_contrastive, 
                           contrastive_weight=contrastive_weight)
     
@@ -474,7 +516,7 @@ def run_fine_tuning(nb_iterations=2, nb_epochs_per_iteration=10,
         nb_best_patches=nb_best_patches,
         resize_size=resize_size, 
         padding_size=padding_size, 
-        test_proportion=0.2,
+        test_proportion=0,
         seed=42)
     )
     test_set = list(get_data_generator(
@@ -482,7 +524,7 @@ def run_fine_tuning(nb_iterations=2, nb_epochs_per_iteration=10,
         nb_best_patches=nb_best_patches,
         resize_size=resize_size, 
         padding_size=padding_size, 
-        test_proportion=0.2,
+        test_proportion=1,
         seed=42)
     )
     
@@ -525,7 +567,7 @@ def run_fine_tuning(nb_iterations=2, nb_epochs_per_iteration=10,
         
         # Save checkpoint every full iteration (after both components)
         if i % 2 == 1:  # After both components trained
-            save_checkpoint(fine_tuner.model, loss_lists, test_lists, iteration)
+            #save_checkpoint(fine_tuner.model, loss_lists, test_lists, iteration)
             iteration += 1
     
     # Final evaluation with UMAP
@@ -535,7 +577,7 @@ def run_fine_tuning(nb_iterations=2, nb_epochs_per_iteration=10,
     print(f"Final Test {metric_name} Score: {final_score:.4f}")
     
     # Save final model
-    save_checkpoint(fine_tuner.model, loss_lists, test_lists, "final")
+    #save_checkpoint(fine_tuner.model, loss_lists, test_lists, "final")
     
     # Plot and print results
     plot_training_results(loss_lists, test_lists, metric)
@@ -550,10 +592,10 @@ if __name__ == '__main__':
     # Run fine-tuning with optimized parameters
     loss_lists, test_lists, trained_model = run_fine_tuning(
         nb_iterations=1,  # Reduced for testing
-        nb_epochs_per_iteration=10,  # Reduced for faster training
-        nb_best_patches=10,
+        nb_epochs_per_iteration=20,  # Reduced for faster training
+        nb_best_patches=50,
         padding_size=2,
-        use_contrastive=False,  # Disable contrastive learning by default
+        use_contrastive=True,  # Disable contrastive learning by default
         contrastive_weight=0.1,
         metric='jaccard'  # Use Jaccard (IoU) by default
     )

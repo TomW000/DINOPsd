@@ -2,27 +2,6 @@ import torch
 from torch import nn
 import numpy as np
 
-device = torch.device('cuda' if torch.cuda.is_available() 
-                      #else 'mps' if torch.mps.is_available()
-                      else 'cpu')
-print("Device:", device)
-
-# select model size
-model_size = 'small' #@param {type:"string", options:["small", "base", "large", "giant"]}
-
-model_dims = {'small': 384, 'base': 768, 'large': 1024, 'giant': 1536}
-assert model_size in model_dims, f'Invalid model size: ({model_size})'
-model = torch.hub.load('facebookresearch/dinov2', f'dinov2_vit{model_size[0]}14_reg')
-model.to(device)# type: ignore
-model.eval()# type: ignore
-
-feat_dim = model_dims[model_size]
-
-
-for param in model.parameters():
-    param.requires_grad = False
-    
-
 class AdaptMLP(nn.Module):
     def __init__(self, device, original_mlp, in_dim, mid_dim, dropout=0.0, s=0.1): # TODO: CHANGE DEPENDING ON TASK
         super().__init__()
@@ -59,14 +38,3 @@ class AdaptMLP(nn.Module):
         output = self.original_mlp(x) + up * self.scale
 
         return output
-
-
-for k in range(len(list(model.blocks))): # type: ignore
-
-    mlp = model.blocks[k].mlp# type: ignore
-    in_dim = model.blocks[k].norm2.normalized_shape[0]# type: ignore
-    mid_dim = int(model.blocks[k].norm2.normalized_shape[0]/10) #TODO: important parameter # type: ignore
-    
-    adapter = AdaptMLP(device, mlp, in_dim, mid_dim)
-
-    model.blocks[k].mlp = adapter# type: ignore

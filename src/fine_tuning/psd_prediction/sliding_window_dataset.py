@@ -172,7 +172,7 @@ def get_data_generator(split: str = 'training',
         embeddings_subset = EMBEDDINGS
 
     DATASET = list(zip(files, embeddings_subset))
-    DATASET = DATASET[:2]
+    DATASET = DATASET[:10]
     random.shuffle(DATASET)
     
     # FIXED: Remove hardcoded dataset limitation - make it configurable

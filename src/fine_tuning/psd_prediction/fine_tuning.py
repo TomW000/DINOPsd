@@ -38,9 +38,16 @@ class FineTuner:
         self.patch_size = self.model[0].patch_size
         
         # Loss functions
-        self.regression_loss_fn = nn.BCEWithLogitsLoss(reduction='sum')
+        self.regression_loss_fn = nn.BCEWithLogitsLoss(reduction='mean')
         if use_contrastive:
             self.contrastive_loss_fn = NTXentLoss()
+            
+        # Define early-stopping criterions
+        self.patience = 1
+        self.min_delta = 0
+        self.counter = 0
+        self.min_test_accuracy = 0
+ 
 
     def initialize_model(self):
         model = torch.hub.load('facebookresearch/dinov2', f'dinov2_vit{self.model_size[0]}14_reg')
@@ -197,7 +204,7 @@ class FineTuner:
                 
                 end_idx = min(i + batch_size, num_patches)
                 if training_index == 1:
-                    batch_embeddings = embeddings[i:end_idx]#.detach().requires_grad_(True)
+                    batch_embeddings = embeddings[i:end_idx].detach().requires_grad_(True)
                 else:
                     batch_embeddings = embeddings[i:end_idx]
                     
@@ -228,7 +235,7 @@ class FineTuner:
                 # Calculate regression loss (keep everything on same device)
                 regression_loss = self.regression_loss_fn(predictions, batch_targets)
                 
-                print(f"  Regression Loss: {regression_loss.item():.4f}")
+                print(f"Regression Loss: {regression_loss.item():.4f}")
                 
                 total_loss += regression_loss
                 regression_losses.append(regression_loss.item())
@@ -249,7 +256,7 @@ class FineTuner:
         
         return avg_total_loss
     
-    def evaluate(self, test_set, use_umap=False, max_samples=None, metric='jaccard'):
+    def evaluate(self, test_set, use_umap=False, max_samples=None, metric='jaccard', epoch=None):
         """Fixed evaluation function with consistent metrics"""
         self.model.eval()
         scores = []
@@ -289,7 +296,12 @@ class FineTuner:
                 # Optional: Display results (uncomment if needed)
                 #display_segmentation(final_prediction, file, score)
                 #display_segmentation(ground_truth_np, file, score)
-                
+                '''
+                if self._early_stop(score):
+                    save_checkpoint(model=self.model, test_accuracy_lists=scores, iteration=epoch)
+                    print(f"Early stopping at epoch {epoch}")
+                    break
+                '''
                 samples_processed += 1
         
         avg_score = np.mean(scores) if scores else 0.0
@@ -383,7 +395,19 @@ class FineTuner:
         plt.ylabel('UMAP 2')
         plt.tight_layout()
         plt.show()
-    
+
+
+    def _early_stop(self, test_accuracy):
+        if test_accuracy > self.min_test_accuracy:
+            self.min_test_accuracy = test_accuracy
+            self.counter = 0
+        elif test_accuracy < (self.min_test_accuracy + self.min_delta):
+            self.counter += 1
+            if self.counter >= self.patience:
+                return True
+        return False
+
+
     def train_component(self, training_index, epochs, train_set, test_set, 
                        batch_size=32, eval_frequency=1, metric='jaccard'):
         """Fixed training component function"""
@@ -405,7 +429,7 @@ class FineTuner:
             if epoch % eval_frequency == 0 or epoch == epochs - 1:
                 # Full evaluation on last epoch, limited during training
                 max_samples = None if epoch == epochs - 1 else 50
-                test_score = self.evaluate(test_set, max_samples=max_samples, metric=metric)
+                test_score = self.evaluate(test_set, max_samples=max_samples, metric=metric, epoch=epoch)
                 test_scores.append(test_score)
                 
                 metric_name = 'IoU' if metric == 'jaccard' else 'F1'
@@ -417,15 +441,14 @@ class FineTuner:
         return train_losses, test_scores
 
 
-def save_checkpoint(model, loss_lists, test_loss_lists, iteration, filename=None):
+def save_checkpoint(model, test_accuracy_lists, iteration, filename=None):
     """Save model checkpoint with training statistics"""
     if filename is None:
         filename = f"checkpoint_iter_{iteration}.pth"
     
     checkpoint = {
         'model_state_dict': model.state_dict(),
-        'loss_lists': loss_lists,
-        'test_loss_lists': test_loss_lists,
+        'test_accuracy_lists': test_accuracy_lists,
         'iteration': iteration
     }
     
@@ -531,7 +554,7 @@ def run_fine_tuning(nb_iterations=2, nb_epochs_per_iteration=10,
     # Training schedule: alternating MLP Head (1) and DINOv2 Adapter (0)
     training_schedule = []
     for _ in range(nb_iterations):
-        training_schedule.extend([1, 0])  # MLP first, then adapter
+        training_schedule.extend([1, 1])  # MLP first, then adapter
     
     # Track results
     loss_lists = [[], []]  # [DINOv2, MLP Head]
@@ -592,10 +615,10 @@ if __name__ == '__main__':
     # Run fine-tuning with optimized parameters
     loss_lists, test_lists, trained_model = run_fine_tuning(
         nb_iterations=1,  # Reduced for testing
-        nb_epochs_per_iteration=20,  # Reduced for faster training
+        nb_epochs_per_iteration=10,  # Reduced for faster training
         nb_best_patches=50,
-        padding_size=2,
-        use_contrastive=True,  # Disable contrastive learning by default
+        padding_size=3,
+        use_contrastive=False,  # Disable contrastive learning by default
         contrastive_weight=0.1,
         metric='jaccard'  # Use Jaccard (IoU) by default
     )

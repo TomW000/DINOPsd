@@ -21,6 +21,11 @@ from src.fine_tuning.display_results import display_segmentation, confusion_matr
 from .sliding_window_dataset import get_data_generator
 
 
+
+# FIXME: check if the max_sample in the evaluate function isn't doing anything funky
+
+
+
 class FineTuner:
     """Fine-tuning class for DINOv2 with adapter layers and MLP head"""
     
@@ -43,10 +48,11 @@ class FineTuner:
             self.contrastive_loss_fn = NTXentLoss()
             
         # Define early-stopping criterions
-        self.patience = 1
-        self.min_delta = 0
+        self.patience = 5
+        self.min_delta = 0.01
         self.counter = 0
-        self.min_test_accuracy = 0
+        self.best_score = -np.inf
+        self.should_stop = False
  
 
     def initialize_model(self):
@@ -296,12 +302,7 @@ class FineTuner:
                 # Optional: Display results (uncomment if needed)
                 #display_segmentation(final_prediction, file, score)
                 #display_segmentation(ground_truth_np, file, score)
-                '''
-                if self._early_stop(score):
-                    save_checkpoint(model=self.model, test_accuracy_lists=scores, iteration=epoch)
-                    print(f"Early stopping at epoch {epoch}")
-                    break
-                '''
+                
                 samples_processed += 1
         
         avg_score = np.mean(scores) if scores else 0.0
@@ -397,22 +398,33 @@ class FineTuner:
         plt.show()
 
 
-    def _early_stop(self, test_accuracy):
-        if test_accuracy > self.min_test_accuracy:
-            self.min_test_accuracy = test_accuracy
+    def _early_stopping(self, test_accuracy, epoch):
+        if test_accuracy > (self.best_score + self.min_delta):
+            self.best_score = test_accuracy
             self.counter = 0
-        elif test_accuracy < (self.min_test_accuracy + self.min_delta):
+            return False
+        else:
             self.counter += 1
             if self.counter >= self.patience:
+                print(f"Early stopping at epoch {epoch} with test accuracy {test_accuracy} and patience {self.patience}")
                 return True
         return False
+    
+    def reset_early_stopping(self):
+        self.counter = 0
+        self.best_score = -np.inf
+        self.should_stop = False
 
 
     def train_component(self, training_index, epochs, train_set, test_set, 
-                       batch_size=32, eval_frequency=1, metric='jaccard'):
+                       batch_size=32, eval_frequency=1, metric='jaccard',
+                       use_early_stopping=True):
         """Fixed training component function"""
         component_names = ['DINOv2 Adapter', 'MLP Head']
         print(f"Training {component_names[training_index]}...")
+        
+        if use_early_stopping:
+            self.reset_early_stopping()
         
         optimizer = self.setup_optimizer(training_index)
         eval_frequency = eval_frequency or max(1, epochs // 10)
@@ -434,6 +446,15 @@ class FineTuner:
                 
                 metric_name = 'IoU' if metric == 'jaccard' else 'F1'
                 print(f"Epoch {epoch+1}/{epochs} - Loss: {train_loss:.4f}, {metric_name}: {test_score:.4f}")
+                
+                if use_early_stopping and self._early_stopping(test_score, epoch):
+                    print('Early stopping triggered at epoch {epoch}'.format(epoch=epoch))
+                    save_checkpoint(model=self.model, 
+                                    test_accuracy_lists=test_scores, 
+                                    iteration=epoch, 
+                                    filename=f"checkpoint_iter_{epoch}.pth")
+                    break
+                
             else:
                 # Reuse last test score for non-evaluation epochs
                 test_scores.append(test_scores[-1] if test_scores else 0.0)
